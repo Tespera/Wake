@@ -53,10 +53,14 @@ The app is ad-hoc signed, so if you download a prebuilt copy instead of building
 
 ```bash
 cargo run -p wake                      # run in dev mode
+cargo test -p wake-core                # data-layer tests (adapter contracts, FTS, scanner)
 cargo run -p wake-core --bin scan      # data-layer smoke test: scan and print stats
 cargo run -p wake-core --bin scan -- --search "useEffect("   # search smoke test
 WAKE_THEME=dark cargo run -p wake      # force dark/light (defaults to system)
+git config core.hooksPath scripts/hooks   # optional: run tests before every commit
 ```
+
+CI runs `cargo test -p wake-core` plus a full app build on every push and PR. Tests parse synthetic fixture sessions only — your real agent data is never touched.
 
 ## Architecture
 

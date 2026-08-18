@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test & build (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # 数据层测试:adapter 解析契约 / seq 一致性 / db 往返 / 扫描终态
+      - name: Test wake-core
+        run: cargo test -p wake-core
+
+      # UI 层无测试套件(gpui),编译通过即门槛
+      - name: Build app
+        run: cargo build -p wake
