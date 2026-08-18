@@ -1,0 +1,21 @@
+[package]
+name = "wake"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 二进制名即 macOS 菜单栏 App 名(裸二进制无 bundle 时取进程名),须大写 Wake
+[[bin]]
+name = "Wake"
+path = "src/main.rs"
+
+[dependencies]
+wake-core = { path = "../wake-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+gpui = "0.2"
+gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
+futures = "0.3"
+chrono.workspace = true
+dirs.workspace = true
