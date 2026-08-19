@@ -4,6 +4,8 @@ A native macOS app that gathers every coding-agent session on your machine into 
 
 Your agent history is scattered across `~/.claude`, `~/.codex`, and five other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
+![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
+
 ## Features
 
 - **Unified browsing** — all sessions grouped by agent / project, live file watching for incremental updates
@@ -11,6 +13,8 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and five other p
 - **Transcript view** — per-message rendering with user/assistant bubbles, collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
 - **One-click resume** — reopens the session in Terminal/iTerm at the original project directory (`claude --resume`, `codex resume`, …)
 - **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown, delete (system Trash + tombstone so deleted sessions stay deleted)
+
+![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
 
 ## Supported agents
 
