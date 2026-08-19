@@ -30,7 +30,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BUILD/Wake" "$APP/Contents/MacOS/Wake"
 cp dist/wake.icns "$APP/Contents/Resources/wake.icns"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+# 版本号从 workspace Cargo.toml 单一来源读取,勿在此硬编码
+VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -41,8 +43,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleExecutable</key><string>Wake</string>
     <key>CFBundleIconFile</key><string>wake</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2.0</string>
-    <key>CFBundleVersion</key><string>0.2.0</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+    <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <!-- 恢复会话要驱动 Terminal/iTerm,删除会话要驱动 Finder。缺这个键,
          macOS 的自动化授权框没有说明文字,启用 hardened runtime 后更会被

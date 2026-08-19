@@ -1,5 +1,10 @@
 # Wake
 
+[![Release](https://img.shields.io/github/v/release/iAmCorey/Wake)](https://github.com/iAmCorey/Wake/releases)
+[![CI](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml/badge.svg)](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-black?logo=apple)](https://github.com/iAmCorey/Wake/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A native macOS app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5).
 
 Your agent history is scattered across `~/.claude`, `~/.codex`, and five other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
@@ -39,7 +44,7 @@ Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory, and
 
 ## Performance
 
-On the author's machine (282 sessions, ~800 MB of JSONL): full index ~4 s, subsequent launches are instant (mtime-based incremental scan), search results in under 1 ms.
+On the author's machine (~289 sessions, ~800 MB of JSONL): full index ~4 s, subsequent launches are instant (mtime-based incremental scan), search results in under 1 ms.
 
 ## Install
 
@@ -58,6 +63,7 @@ The app is ad-hoc signed, so if you download a prebuilt copy instead of building
 ```bash
 cargo run -p wake                      # run in dev mode
 scripts/test.sh                        # one-command test entry: data-layer tests + UI compile gate
+scripts/test.sh --smoke                # adds a real-data scan baseline (reads your local agent dirs, read-only)
 cargo test -p wake-core                # data-layer tests only (adapter contracts, FTS, scanner)
 cargo run -p wake-core --bin scan      # data-layer smoke test: scan and print stats
 cargo run -p wake-core --bin scan -- --search "useEffect("   # search smoke test
@@ -66,7 +72,7 @@ git config core.hooksPath scripts/hooks   # optional: run tests before every com
 python3 scripts/demo-home.py           # build a synthetic fake-home dataset for screenshots/demos
 ```
 
-CI runs `cargo test -p wake-core` plus a full app build on every push and PR. Tests parse synthetic fixture sessions only — your real agent data is never touched.
+CI runs `cargo test -p wake-core` plus a full app build on every push to main and every PR. The test suite parses synthetic fixture sessions only — your real agent data is never touched.
 
 ## Architecture
 
