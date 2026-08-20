@@ -9,7 +9,7 @@
 
 A native macOS app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5).
 
-Your agent history is scattered across `~/.claude`, `~/.codex`, and five other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
+Your agent history is scattered across `~/.claude`, `~/.codex`, and nine other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
 ![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
 
@@ -54,7 +54,7 @@ Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Dro
 
 ## Performance
 
-On the author's machine (~289 sessions, ~800 MB of JSONL): full index ~4 s, subsequent launches are instant (mtime-based incremental scan), search results in under 1 ms.
+On the author's machine (~310 sessions, ~800 MB of JSONL): full index ~5 s, subsequent launches are instant (mtime-based incremental scan), search results in under 1 ms.
 
 ## Install
 

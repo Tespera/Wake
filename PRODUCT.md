@@ -12,7 +12,7 @@ Rust + gpui 0.2 + gpui-component 0.5(用户既定,workspace: crates/wake-core �
 
 ## Users
 
-Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18,v0.1.0,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
+Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.2.0 2026-08-20,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
 
 ## Product Purpose
 
@@ -24,11 +24,11 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Operating Context
 
-日常开发中随手唤起(常驻后台索引);与终端、编辑器并排使用;深浅色环境都会出现(跟随系统)。数据规模:本机 ~289 会话/约 800MB JSONL,实时增量。
+日常开发中随手唤起(常驻后台索引);与终端、编辑器并排使用;深浅色环境都会出现(跟随系统)。数据规模:本机 ~310 会话/约 800MB JSONL,实时增量。
 
 ## Capabilities and Constraints
 
-已实现:十二家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(wake-core 20 测试 + CI + pre-commit,合成 fixture)。
+已实现:十二家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(wake-core 21 测试 + CI + pre-commit,合成 fixture)。
 约束:对 agent 数据目录只读;绝不写 Codex 的 SQLite;不读凭证;GPUI 无 SF Symbols(图标用 lucide SVG 自备)。
 已支持十二家 agent:Claude Code、Codex、Copilot CLI、Cursor(CLI transcripts)、OpenCode(含 OpenCode 2 beta,2026-08-20 同 adapter 双表支持,v2 会话标 opencode2 徽章)、Kiro、Gemini CLI(2026-08-17 P1 五家落地)+ Pi、Oh My Pi、Grok Build、Kimi Code、Antigravity CLI(2026-08-19 对齐 kooky 内置 roster;Antigravity 正文加密仅元数据卡片)。做不了的:Cursor IDE chats 正文加密,Windsurf/Trae 加密,Amp/Factory(Droid)/Warp 云端无本地数据,Reasonix 本机零会话格式未实测。
 
@@ -38,7 +38,7 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Evidence on Hand
 
-开发验证用真实本机数据(~289 会话)。**对外截图/演示一律用合成数据**:`scripts/demo-home.py` 生成假家目录(22 个合成会话/5 个假项目/七家全亮),2026-08-19 定——真实项目名私密,不对外展示。
+开发验证用真实本机数据(~310 会话)。**对外截图/演示一律用合成数据**:`scripts/demo-home.py` 生成假家目录(22 个合成会话/5 个假项目/七家全亮),2026-08-19 定——真实项目名私密,不对外展示。
 
 ## Product Principles
 

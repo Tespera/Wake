@@ -2,7 +2,7 @@
 
 ## [0.2.0] — 2026-08-20
 
-- New: 5 new supported agents — Pi, Oh My Pi, Grok Build, Kimi Code, Antigravity CLI (12 total)
+- New: 5 new supported agents — Pi, Oh My Pi, Grok Build, Kimi Code, Antigravity CLI (12 total), all resumable from the terminal
 - New: OpenCode 2 (beta) support, with an `opencode2` badge and correct resume
 - New: session detail shows the session file path — click to reveal in Finder
 - New: Kiro sessions show the model used
