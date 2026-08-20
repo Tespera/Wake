@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1] — 2026-08-20
+
+- Fix: resuming OpenCode sessions in your terminal now works (broken in the 0.2.0 build)
+
 ## [0.2.0] — 2026-08-20
 
 - New: 5 new supported agents — Pi, Oh My Pi, Grok Build, Kimi Code, Antigravity CLI (12 total), all resumable from the terminal
