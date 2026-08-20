@@ -1,7 +1,7 @@
 use crate::models::*;
 use serde_json::Value;
 
-/// 文件 mtime → epoch ms(七家 adapter 与 watcher 共用)
+/// 文件 mtime → epoch ms(各家 adapter 与 watcher 共用)
 pub fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
     meta.modified()
         .ok()
@@ -55,7 +55,7 @@ pub fn assign_seq(messages: &mut [TranscriptMessage]) {
     }
 }
 
-/// 标题推导:首条真实用户消息经清洗,七家共用的回退链
+/// 标题推导:首条真实用户消息经清洗,各家共用的回退链
 pub fn title_from_messages(messages: &[TranscriptMessage]) -> Option<String> {
     messages
         .iter()
@@ -117,6 +117,42 @@ pub fn list_jsonl_refs(
         });
     }
     refs
+}
+
+/// content blocks 数组 → 纯文本(取各块 "text" 字段,trim 后 join)
+pub fn blocks_text(v: &Value) -> String {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 按 mtime 失效的单值缓存(边车映射/SQLite 全表在一轮扫描内的重复调用)。
+/// build 返回 None 时不缓存失败结果,mtime 不变也会在下次重试。
+pub struct MtimeCache<T: Clone>(std::sync::Mutex<Option<(i64, T)>>);
+
+impl<T: Clone> MtimeCache<T> {
+    pub fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    pub fn get_or_try_build(&self, mtime: i64, build: impl FnOnce() -> Option<T>) -> Option<T> {
+        {
+            let cache = self.0.lock().unwrap();
+            if let Some((t, v)) = cache.as_ref() {
+                if *t == mtime {
+                    return Some(v.clone());
+                }
+            }
+        }
+        let v = build()?;
+        *self.0.lock().unwrap() = Some((mtime, v.clone()));
+        Some(v)
+    }
 }
 
 /// tool_use 块 → ToolCallView(preview + pretty-print input 三件套统一)

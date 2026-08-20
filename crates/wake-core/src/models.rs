@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// 变体声明序即侧栏固定展示序(derive Ord 直接按此序比较)——
+/// 新增 agent 一律追加在末尾,老条目位置不动
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentId {
     ClaudeCode,
@@ -10,6 +12,11 @@ pub enum AgentId {
     Opencode,
     Kiro,
     Gemini,
+    Pi,
+    Omp,
+    Grok,
+    Kimi,
+    Antigravity,
 }
 
 impl AgentId {
@@ -22,6 +29,11 @@ impl AgentId {
             AgentId::Opencode => "opencode",
             AgentId::Kiro => "kiro",
             AgentId::Gemini => "gemini",
+            AgentId::Pi => "pi",
+            AgentId::Omp => "omp",
+            AgentId::Grok => "grok",
+            AgentId::Kimi => "kimi",
+            AgentId::Antigravity => "antigravity",
         }
     }
 
@@ -34,6 +46,11 @@ impl AgentId {
             "opencode" => Some(AgentId::Opencode),
             "kiro" => Some(AgentId::Kiro),
             "gemini" => Some(AgentId::Gemini),
+            "pi" => Some(AgentId::Pi),
+            "omp" => Some(AgentId::Omp),
+            "grok" => Some(AgentId::Grok),
+            "kimi" => Some(AgentId::Kimi),
+            "antigravity" => Some(AgentId::Antigravity),
         _ => None,
         }
     }
@@ -47,14 +64,19 @@ impl AgentId {
             AgentId::Opencode => "OpenCode",
             AgentId::Kiro => "Kiro",
             AgentId::Gemini => "Gemini CLI",
+            AgentId::Pi => "Pi",
+            AgentId::Omp => "Oh My Pi",
+            AgentId::Grok => "Grok Build",
+            AgentId::Kimi => "Kimi Code",
+            AgentId::Antigravity => "Antigravity CLI",
         }
     }
 
     /// agent 品牌图标——wake crate `Assets` 内嵌的 PNG 路径(lobe-icons 素材,
     /// 与 kooky 同源)。后缀必须带上(与 SVG 图标同理,漏后缀 = 静默空白)。
-    /// Copilot/Cursor/OpenCode 是单色字形(白色+alpha):深色模式用白色版,
-    /// 浅色模式用 `-light`(深墨 #2B2A26)版——等效 kooky 的 template 染色;
-    /// 彩色品牌(Claude/Codex/Gemini/Kiro)保持原色,两模式通用。
+    /// Copilot/Cursor/OpenCode/Pi/Grok/Kimi 是单色字形(白色+alpha):深色模式
+    /// 用白色版,浅色模式用 `-light`(深墨 #2B2A26)版——等效 kooky 的染色;
+    /// 彩色品牌(Claude/Codex/Gemini/Kiro/Omp/Antigravity)保持原色,两模式通用。
     pub fn brand_icon(&self, dark: bool) -> &'static str {
         match self {
             AgentId::ClaudeCode => "brands/claude-code.png",
@@ -70,6 +92,17 @@ impl AgentId {
             }
             AgentId::Kiro => "brands/kiro.png",
             AgentId::Gemini => "brands/gemini.png",
+            AgentId::Pi => {
+                if dark { "brands/pi.png" } else { "brands/pi-light.png" }
+            }
+            AgentId::Omp => "brands/omp.png",
+            AgentId::Grok => {
+                if dark { "brands/grok.png" } else { "brands/grok-light.png" }
+            }
+            AgentId::Kimi => {
+                if dark { "brands/kimi.png" } else { "brands/kimi-light.png" }
+            }
+            AgentId::Antigravity => "brands/antigravity.png",
         }
     }
 

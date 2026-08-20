@@ -45,7 +45,7 @@ use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
 use crate::ui::*;
-use crate::format::{abs_date, fmt_tokens, one_line, relative_time};
+use crate::format::{abs_date, display_file_path, fmt_tokens, one_line, relative_time};
 
 actions!(wake, [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]);
 
@@ -574,7 +574,9 @@ impl Workbench {
             .into_iter()
             .filter_map(|(k, v)| AgentId::from_str(&k).map(|a| (a, v)))
             .collect();
-        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        // 固定排序(AgentId 声明序):按会话数排会在平局时抖动
+        // (HashMap 迭代无序),每次刷新侧栏顺序都会跳
+        counts.sort_by_key(|&(a, _)| a);
         self.agent_counts = counts;
         self.projects = self.store.list_projects().unwrap_or_default();
         self.starred_count = self.store.starred_count().unwrap_or(0);
@@ -2068,7 +2070,14 @@ impl Workbench {
                             .when_some(
                                 meta.source.clone().filter(|s| !s.is_empty()),
                                 |this, source| {
-                                    this.child(outline_badge(source, theme.success))
+                                    // opencode2 是版本代际标记而非发起平台,
+                                    // 用 primary 蓝与 via 徽章(绿)区分
+                                    let color = if source == "opencode2" {
+                                        theme.primary
+                                    } else {
+                                        theme.success
+                                    };
+                                    this.child(outline_badge(source, color))
                                 },
                             )
                             .child(div().min_w_0().truncate().child(stats.join("  ·  ")))
@@ -2087,6 +2096,23 @@ impl Workbench {
                             .text_color(theme.muted_foreground)
                             .truncate()
                             .child(times.join("  ·  "))
+                    })
+                    .child({
+                        // 会话文件路径(header 末行):展示用折叠形态(~ 缩写 +
+                        // 中段省略),点击在 Finder 中显示(传原始完整路径)
+                        let file_path = meta.file_path.clone();
+                        h_flex()
+                            .id("detail-file-path")
+                            .gap_1p5()
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.muted_foreground)
+                            .cursor_pointer()
+                            .hover(|s| s.text_colored(theme.foreground, FONT_LABEL))
+                            .on_click(move |_, _, _| {
+                                terminal::reveal_in_finder(&file_path);
+                            })
+                            .child(icon("icons/file-text.svg").with_size(px(12.)).flex_shrink_0())
+                            .child(div().min_w_0().truncate().child(display_file_path(&meta.file_path)))
                     }),
             )
             .child(if detail.loading {

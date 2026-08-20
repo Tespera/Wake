@@ -51,6 +51,16 @@ pub fn cli_path(agent: AgentId) -> Option<String> {
     resolve_clis(&[bin]).get(bin).cloned().flatten()
 }
 
+/// 会话级二进制:OpenCode v2 beta 与 v1 并存、装为 `opencode2`,
+/// v2 会话(source = "opencode2")必须由它恢复,其余会话走 agent 默认 bin
+fn session_bin(meta: &SessionMeta) -> Option<&'static str> {
+    if meta.agent == AgentId::Opencode && meta.source.as_deref() == Some("opencode2") {
+        Some("opencode2")
+    } else {
+        agent_bin(meta.agent)
+    }
+}
+
 pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
     match agent {
         AgentId::ClaudeCode => Some("claude"),
@@ -60,6 +70,11 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
         AgentId::Opencode => Some("opencode"),
         AgentId::Kiro => Some("kiro"),
         AgentId::Gemini => Some("gemini"),
+        AgentId::Pi => Some("pi"),
+        AgentId::Omp => Some("omp"),
+        AgentId::Grok => Some("grok"),
+        AgentId::Kimi => Some("kimi"),
+        AgentId::Antigravity => Some("agy"),
     }
 }
 
@@ -69,6 +84,12 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
         AgentId::Codex => Some((vec!["resume".into(), id.into()], false)),
         AgentId::Copilot => Some((vec![format!("--resume={id}")], false)),
         AgentId::Cursor => Some((vec!["--resume".into(), id.into()], false)),
+        // 参数形制与 kooky 的 resume 集成一致(空格/等号是各家 CLI 实测约束)
+        AgentId::Pi => Some((vec!["--session".into(), id.into()], false)),
+        AgentId::Omp => Some((vec!["--resume".into(), id.into()], false)),
+        AgentId::Grok => Some((vec!["--resume".into(), id.into()], false)),
+        AgentId::Kimi => Some((vec!["--session".into(), id.into()], false)),
+        AgentId::Antigravity => Some((vec![format!("--conversation={id}")], false)),
         _ => None,
     }
 }
@@ -381,13 +402,14 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
             error: Some(format!("Resume isn't supported for {} yet", meta.agent.display_name())),
         };
     };
-    let Some(cli) = cli_path(meta.agent) else {
+    let bin = session_bin(meta);
+    let Some(cli) = bin.and_then(|b| resolve_clis(&[b]).get(b).cloned().flatten()) else {
         return ResumeOutcome {
             ok: false,
             command: String::new(),
             error: Some(format!(
                 "Command {} not found — is it installed?",
-                agent_bin(meta.agent).unwrap_or("?")
+                bin.unwrap_or("?")
             )),
         };
     };
@@ -458,5 +480,11 @@ pub fn show_fatal_alert(message: &str) {
 }
 
 pub fn reveal_in_finder(path: &str) {
-    let _ = Command::new("open").args(["-R", path]).status();
+    // SQLite 型会话是 <db>#<id> 虚拟路径,磁盘上不存在——reveal 库文件本体
+    let p = if Path::new(path).exists() {
+        path
+    } else {
+        path.rsplit_once('#').map(|(db, _)| db).unwrap_or(path)
+    };
+    let _ = Command::new("open").args(["-R", p]).status();
 }

@@ -1,24 +1,28 @@
-//! 七家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
+//! 十二家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
 //! fixture 为全合成数据(tests/fixtures/,SQLite 型在临时 HOME 里现建)。
 //!
-//! Copilot/OpenCode 的 parse 只认 `~/.copilot`、`~/.local/share/opencode`
-//! (路径在 `new()` 时由 HOME 解析),Gemini 的 cwd 反查读 `~/.gemini/projects.json`,
-//! 因此测试统一把 HOME 指到临时假家目录(OnceLock 保证 set_var 先于一切
-//! adapter 构造,且只发生一次)。文件型 agent 的 SessionFileRef 直接指向
-//! fixture 路径,不依赖 HOME。
+//! Copilot/OpenCode/Antigravity 的 parse 只认各自 HOME 下的库,Gemini 的 cwd
+//! 反查读 `~/.gemini/projects.json`,Kimi 的 cwd 反查读
+//! `~/.kimi-code/session_index.jsonl`,因此测试统一把 HOME 指到临时假家目录
+//! (OnceLock 保证 set_var 先于一切 adapter 构造,且只发生一次)。文件型
+//! agent 的 SessionFileRef 直接指向 fixture 路径,不依赖 HOME。
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use wake_core::adapters::antigravity::AntigravityAdapter;
 use wake_core::adapters::claude::ClaudeAdapter;
 use wake_core::adapters::codex::CodexAdapter;
 use wake_core::adapters::copilot::CopilotAdapter;
 use wake_core::adapters::cursor::CursorAdapter;
 use wake_core::adapters::gemini::GeminiAdapter;
+use wake_core::adapters::grok::GrokAdapter;
+use wake_core::adapters::kimi::KimiAdapter;
 use wake_core::adapters::kiro::KiroAdapter;
 use wake_core::adapters::opencode::OpencodeAdapter;
+use wake_core::adapters::pi::PiAdapter;
 use wake_core::adapters::AgentAdapter;
 use wake_core::models::*;
 
@@ -27,6 +31,7 @@ use wake_core::models::*;
 struct TestEnv {
     copilot_db: PathBuf,
     opencode_db: PathBuf,
+    antigravity_db: PathBuf,
     /// 假 HOME 目录本体,持有 TempDir 保证整个测试进程期间不被清理
     _home: tempfile::TempDir,
 }
@@ -60,10 +65,29 @@ fn setup() -> &'static TestEnv {
         )
         .expect("write projects.json");
 
+        let ag_dir = gem_dir.join("antigravity-cli");
+        fs::create_dir_all(&ag_dir).expect("mkdir antigravity-cli");
+        let antigravity_db = ag_dir.join("conversation_summaries.db");
+        build_antigravity_db(&antigravity_db);
+
+        let kimi_dir = home.path().join(".kimi-code");
+        fs::create_dir_all(&kimi_dir).expect("mkdir .kimi-code");
+        fs::write(
+            kimi_dir.join("session_index.jsonl"),
+            concat!(
+                r#"{"sessionId":"session_88888888-aaaa-bbbb-cccc-000000000008","sessionDir":"/x","workDir":"/Users/tester/Github/wakefx"}"#,
+                "\n",
+                r#"{"sessionId":"session_99999999-aaaa-bbbb-cccc-000000000009","sessionDir":"/x","workDir":"/Users/tester/Github/wakefx"}"#,
+                "\n",
+            ),
+        )
+        .expect("write kimi session_index");
+
         std::env::set_var("HOME", home.path());
         TestEnv {
             copilot_db,
             opencode_db,
+            antigravity_db,
             _home: home,
         }
     })
@@ -95,8 +119,11 @@ fn build_copilot_db(path: &Path) {
     .expect("populate copilot fixture db");
 }
 
-/// OpenCode `opencode.db` 最小同构库:session + message + part。
-/// msg-a 只有 synthetic part(应归 Meta);msg-c 带 reasoning/tool/unknown part。
+/// OpenCode `opencode.db` 最小同构库,v1 与 v2 两代表并存(v2 迁移后形态):
+/// v1:session + message + part,msg-a 只有 synthetic part(应归 Meta),
+/// msg-c 带 reasoning/tool/unknown part;oc-0001 只存在于 v1 表(模拟迁移后
+/// 又用 v1 CLI 跑的会话),必须被 UNION 回捞。
+/// v2:session_v2 + session_message,ocv2-0001 是 opencode2 beta 会话。
 fn build_opencode_db(path: &Path) {
     let conn = rusqlite::Connection::open(path).expect("create opencode fixture db");
     conn.execute_batch(
@@ -105,14 +132,14 @@ fn build_opencode_db(path: &Path) {
             id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT,
             time_created INTEGER, time_updated INTEGER, model TEXT,
             tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
-            time_archived INTEGER
+            time_archived INTEGER, version TEXT
         );
         CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
         CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, data TEXT);
         INSERT INTO session VALUES
             ('oc-0001', NULL, '/Users/tester/Github/wakefx', 'OpenCode 二维码排查',
              1786000000000, 1786000600000, '{"providerID":"anthropic","id":"claude-sonnet-4-5"}',
-             100, 50, 25, NULL);
+             100, 50, 25, NULL, '1.14.50');
         INSERT INTO message VALUES
             ('msg-a','oc-0001','{"id":"msg-a","role":"user","time":{"created":1786000050000}}',1786000050000),
             ('msg-b','oc-0001','{"id":"msg-b","role":"user","time":{"created":1786000100000}}',1786000100000),
@@ -125,9 +152,59 @@ fn build_opencode_db(path: &Path) {
             ('prt-c-03','oc-0001','msg-c','{"type":"tool","callID":"oc_call_1","tool":"grep","state":{"status":"completed","input":{"pattern":"useEffect"},"output":"src/QrScanner.tsx: useEffect(() => watch())"}}'),
             ('prt-c-04','oc-0001','msg-c','{"type":"text","text":"找到泄漏点,已在清理回调里停止扫描。"}'),
             ('prt-c-05','oc-0001','msg-c','{"type":"wibble-part"}');
+        CREATE TABLE session_v2 (
+            id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT,
+            time_created INTEGER, time_updated INTEGER, model TEXT,
+            tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+            time_archived INTEGER, version TEXT
+        );
+        CREATE TABLE session_message (
+            id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+            time_created INTEGER, time_updated INTEGER, data TEXT
+        );
+        INSERT INTO session_v2 VALUES
+            ('ocv2-0001', NULL, '/Users/tester/Github/wakefx', 'OpenCode v2 greeting',
+             1786100000000, 1786100300000, '{"id":"nemotron-3.5-lightning-free","providerID":"opencode"}',
+             10, 5, 2, NULL, '0.0.0-beta-17639');
+        INSERT INTO session_message VALUES
+            ('m2-0','ocv2-0001','user',0,1786100000000,1786100000000,
+             '{"text":"OpenCode v2 看看二维码组件","time":{"created":1786100000000},"files":[],"agents":[]}'),
+            ('m2-1','ocv2-0001','synthetic',1,1786100001000,1786100001000,
+             '{"text":"<system-reminder>Note: the user opened QrScanner.tsx</system-reminder>","time":{"created":1786100001000}}'),
+            ('m2-2','ocv2-0001','assistant',2,1786100002000,1786100002000,
+             '{"agent":"build","model":{"id":"nemotron-3.5-lightning-free","providerID":"opencode","variant":"default"},"time":{"created":1786100002000},"content":[{"type":"reasoning","text":"用户要看扫描组件"},{"type":"text","text":"看完了,组件没有泄漏。"},{"type":"wibble-block"}]}'),
+            ('m2-3','ocv2-0001','wibble-row',3,1786100003000,1786100003000,'{}');
         "#,
     )
     .expect("populate opencode fixture db");
+}
+
+/// Antigravity `conversation_summaries.db` 最小同构库:标题在 preview 列
+/// (title 列常空);ag-0002 是子会话(parent 非空),必须被过滤。
+fn build_antigravity_db(path: &Path) {
+    let conn = rusqlite::Connection::open(path).expect("create antigravity fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE conversation_summaries (
+            conversation_id text, title text NOT NULL DEFAULT "",
+            preview text NOT NULL DEFAULT "", step_count integer NOT NULL DEFAULT 0,
+            last_modified_time datetime NOT NULL, workspace_uris text NOT NULL,
+            parent_conversation_id text NOT NULL DEFAULT "",
+            nesting_depth integer NOT NULL DEFAULT 0,
+            last_user_input_time datetime NOT NULL,
+            PRIMARY KEY (conversation_id)
+        );
+        INSERT INTO conversation_summaries
+            (conversation_id, title, preview, step_count, last_modified_time,
+             workspace_uris, parent_conversation_id, nesting_depth, last_user_input_time)
+        VALUES
+            ('ag-0001', '', 'QR overlay polish', 12, '2026-08-06 13:00:00.000000+00:00',
+             '["file:///Users/tester/Github/wakefx"]', '', 0, '2026-08-06 13:00:00.000000+00:00'),
+            ('ag-0002', '', 'Child convo', 3, '2026-08-06 13:05:00.000000+00:00',
+             '["file:///Users/tester/Github/wakefx"]', 'ag-0001', 1, '0001-01-01 00:00:00+00:00');
+        "#,
+    )
+    .expect("populate antigravity fixture db");
 }
 
 // ---------------------------------------------------------------- 小工具
@@ -207,6 +284,28 @@ fn gemini_ref() -> SessionFileRef {
         AgentId::Gemini,
         &fixture("gemini/tmp/wakefx-gem/chats/session-2026-08-04T12-00-00.jsonl"),
         "session-2026-08-04T12-00-00",
+    )
+}
+/// pi 与 omp 同构,同一份 fixture 两个 agent 复用(仅 root/AgentId 不同)
+fn pi_ref(agent: AgentId) -> SessionFileRef {
+    fs_ref(
+        agent,
+        &fixture("pi/agent/sessions/--Users-tester-Github-wakefx--/2026-08-06T10-00-00-000Z_66666666-aaaa-bbbb-cccc-000000000006.jsonl"),
+        "66666666-aaaa-bbbb-cccc-000000000006",
+    )
+}
+fn grok_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Grok,
+        &fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/updates.jsonl"),
+        "77777777-aaaa-bbbb-cccc-000000000007",
+    )
+}
+fn kimi_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Kimi,
+        &fixture("kimi/sessions/wd_wakefx_abc123/session_88888888-aaaa-bbbb-cccc-000000000008/agents/main/wire.jsonl"),
+        "session_88888888-aaaa-bbbb-cccc-000000000008",
     )
 }
 
@@ -434,9 +533,10 @@ fn kiro_parse_contract() {
     let s = adapter.parse_session(&r).expect("kiro parse_session");
     let t = adapter.parse_transcript(&r).expect("kiro parse_transcript");
 
-    // .json 边车给标题与 cwd
+    // .json 边车给标题、cwd 与模型(session_state.rts_model_state.model_info)
     assert_eq!(s.meta.title, "Kiro QR session");
     assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.model.as_deref(), Some("claude-sonnet-4"));
     assert_eq!(s.meta.created_at, ms("2026-08-03T08:00:00Z"));
     assert_eq!(s.meta.updated_at, ms("2026-08-03T08:30:00Z")); // 边车晚于消息时间
     assert_eq!(s.meta.message_count, 2);
@@ -481,6 +581,211 @@ fn gemini_parse_contract() {
     assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
 }
 
+#[test]
+fn opencode_v2_parse_contract() {
+    let env = setup();
+    let adapter = OpencodeAdapter::new();
+
+    // 两代表 UNION:v2 会话 + 仅存于 v1 表的会话都在列表里,不重不漏
+    let ids: HashSet<String> = adapter
+        .list_session_files()
+        .expect("opencode list")
+        .into_iter()
+        .map(|r| r.native_id)
+        .collect();
+    assert!(ids.contains("ocv2-0001"), "v2 会话应在列表");
+    assert!(ids.contains("oc-0001"), "仅存于 v1 表的会话应被 UNION 回捞");
+
+    let r = db_ref(AgentId::Opencode, &env.opencode_db, "ocv2-0001");
+    let s = adapter.parse_session(&r).expect("opencode v2 parse_session");
+    let t = adapter.parse_transcript(&r).expect("opencode v2 parse_transcript");
+
+    assert_eq!(s.meta.title, "OpenCode v2 greeting");
+    assert_eq!(s.meta.model.as_deref(), Some("nemotron-3.5-lightning-free"));
+    assert_eq!(s.meta.source.as_deref(), Some("opencode2")); // beta 版本号 → 徽章/resume 换 bin
+    assert_eq!(s.meta.tokens_used, Some(17));
+    assert_eq!(s.meta.created_at, 1786100000000);
+    // wibble-row(未知消息 type)+ wibble-block(未知内容块)各计一次
+    assert_eq!(s.unknown_line_count, 2);
+
+    // user 的 text 在 data 顶层;synthetic 行归 Meta;assistant 的 content 块数组
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::User, MessageKind::Meta),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert_eq!(t.mainline[0].text, "OpenCode v2 看看二维码组件");
+    let a = &t.mainline[2];
+    assert_eq!(a.text, "看完了,组件没有泄漏。");
+    assert!(a.thinking.as_deref().unwrap_or_default().contains("扫描组件"));
+    assert_eq!(a.model.as_deref(), Some("nemotron-3.5-lightning-free"));
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 2]);
+
+    // 仅存于 v1 表的会话不带 v2 标记(resume 走 v1 二进制)
+    let s1 = adapter
+        .parse_session(&db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001"))
+        .expect("opencode v1 parse_session");
+    assert_eq!(s1.meta.source, None);
+}
+
+#[test]
+fn pi_parse_contract() {
+    setup();
+    let adapter = PiAdapter::new();
+    // file_ref 是公开 API:<timestamp>_<uuid>.jsonl 应剥出 uuid 作 native_id
+    let path = fixture("pi/agent/sessions/--Users-tester-Github-wakefx--/2026-08-06T10-00-00-000Z_66666666-aaaa-bbbb-cccc-000000000006.jsonl");
+    let r = adapter.file_ref(&path).expect("pi file_ref");
+    assert_eq!(r.native_id, "66666666-aaaa-bbbb-cccc-000000000006");
+
+    let s = adapter.parse_session(&r).expect("pi parse_session");
+    let t = adapter.parse_transcript(&r).expect("pi parse_transcript");
+
+    assert_eq!(s.meta.title, "Pi 查一下二维码组件的 useEffect() 清理");
+    assert_eq!(s.meta.key, "pi:66666666-aaaa-bbbb-cccc-000000000006");
+    // cwd 来自 session 首行,不反推有损编码目录名
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(s.meta.tokens_used, Some(4300)); // 最后一条 assistant 的 totalTokens
+    assert_eq!(s.meta.message_count, 2);
+    assert_eq!(s.meta.created_at, ms("2026-08-06T10:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-06T10:00:12Z"));
+    // wibble-line 计 unknown;model_change/thinking_level_change 不计
+    assert_eq!(s.unknown_line_count, 1);
+
+    // 连续 assistant 行(中间只隔 toolResult)合并成一条
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+    );
+    let a = &t.mainline[1];
+    assert_eq!(a.text, "找到泄漏点,已补清理回调。");
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "bash");
+    // toolResult 是独立 role 行,按 toolCallId 回填
+    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("QrScanner"));
+    assert!(!a.tool_calls[0].is_error);
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+
+    // omp 是 pi 的 fork,同一解析核心,只有 key 前缀不同
+    let omp = PiAdapter::omp();
+    let s2 = omp.parse_session(&pi_ref(AgentId::Omp)).expect("omp parse_session");
+    assert_eq!(s2.meta.agent, AgentId::Omp);
+    assert_eq!(s2.meta.key, "omp:66666666-aaaa-bbbb-cccc-000000000006");
+    assert_eq!(s2.meta.title, "Pi 查一下二维码组件的 useEffect() 清理");
+}
+
+#[test]
+fn grok_parse_contract() {
+    setup();
+    let adapter = GrokAdapter::new();
+    // file_ref 是公开 API:只认 updates.jsonl,native_id 取会话目录名
+    let path = fixture("grok/sessions/%2FUsers%2Ftester%2FGithub%2Fwakefx/77777777-aaaa-bbbb-cccc-000000000007/updates.jsonl");
+    let r = adapter.file_ref(&path).expect("grok file_ref");
+    assert_eq!(r.native_id, "77777777-aaaa-bbbb-cccc-000000000007");
+    assert!(adapter.file_ref(&path.with_file_name("chat_history.jsonl")).is_none());
+
+    let s = adapter.parse_session(&r).expect("grok parse_session");
+    let t = adapter.parse_transcript(&r).expect("grok parse_transcript");
+
+    assert_eq!(s.meta.title, "Grok QR scan cleanup"); // summary.json 标题优先
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx"); // info.cwd
+    assert_eq!(s.meta.git_branch.as_deref(), Some("feat/qr"));
+    assert_eq!(s.meta.model.as_deref(), Some("grok-composer-2.5-fast"));
+    assert_eq!(s.meta.created_at, ms("2026-08-06T11:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-06T11:20:00Z"));
+    assert_eq!(s.meta.message_count, 2);
+    assert_eq!(s.unknown_line_count, 1); // wibble_update;auto_compact_started 不计
+
+    // chunk 流按角色段合并:两条 user chunk 拼成一条,thought/message/tool 全并入一条 assistant
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+    );
+    assert_eq!(t.mainline[0].text, "Grok 看看二维码扫描,重点 useEffect() 清理");
+    assert_eq!(t.mainline[0].timestamp, Some(1786014300000));
+    let a = &t.mainline[1];
+    assert_eq!(a.text, "已定位泄漏,补了清理回调。");
+    assert!(a.thinking.as_deref().unwrap_or_default().contains("effect 泄漏"));
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "Grep");
+    // tool_call_update 的 content 文本回填 output;字节数组 rawOutput 不碰
+    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("found 2 matches"));
+    assert!(!a.tool_calls[0].is_error);
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+}
+
+#[test]
+fn kimi_parse_contract() {
+    setup();
+    let adapter = KimiAdapter::new();
+    // file_ref 是公开 API:只认 agents/main/wire.jsonl,native_id 取会话目录名
+    let path = fixture("kimi/sessions/wd_wakefx_abc123/session_88888888-aaaa-bbbb-cccc-000000000008/agents/main/wire.jsonl");
+    let r = adapter.file_ref(&path).expect("kimi file_ref");
+    assert_eq!(r.native_id, "session_88888888-aaaa-bbbb-cccc-000000000008");
+
+    let s = adapter.parse_session(&r).expect("kimi parse_session");
+    let t = adapter.parse_transcript(&r).expect("kimi parse_transcript");
+
+    assert_eq!(s.meta.title, "Kimi QR fix"); // state.json 标题优先
+    // cwd 靠假 HOME 的 session_index.jsonl 反查(目录名 hash 不可反推)
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx");
+    assert_eq!(s.meta.created_at, ms("2026-08-06T12:00:00Z"));
+    assert_eq!(s.meta.updated_at, ms("2026-08-06T12:30:00Z"));
+    assert_eq!(s.meta.message_count, 2);
+    // wibble.record 计 unknown;metadata/config/tools/turn.*/append_loop_event 不计
+    assert_eq!(s.unknown_line_count, 1);
+
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![(Role::User, MessageKind::Text), (Role::Assistant, MessageKind::Text)]
+    );
+    assert_eq!(t.mainline[0].text, "Kimi 修一下二维码组件的 useEffect() 内存泄漏");
+    assert!(t.mainline[1].text.contains("QrScanner"));
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+
+    // "New Session" 是占位标题,必须回退首条用户消息
+    let placeholder = fs_ref(
+        AgentId::Kimi,
+        &fixture("kimi/sessions/wd_wakefx_abc123/session_99999999-aaaa-bbbb-cccc-000000000009/agents/main/wire.jsonl"),
+        "session_99999999-aaaa-bbbb-cccc-000000000009",
+    );
+    let s2 = adapter.parse_session(&placeholder).expect("kimi placeholder parse");
+    assert_eq!(s2.meta.title, "占位标题会话应回退到这句");
+}
+
+#[test]
+fn antigravity_parse_contract() {
+    let env = setup();
+    let adapter = AntigravityAdapter::new();
+
+    // 子会话(parent_conversation_id 非空)不进列表
+    let refs = adapter.list_session_files().expect("antigravity list");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].native_id, "ag-0001");
+
+    let r = db_ref(AgentId::Antigravity, &env.antigravity_db, "ag-0001");
+    let s = adapter.parse_session(&r).expect("antigravity parse_session");
+    let t = adapter.parse_transcript(&r).expect("antigravity parse_transcript");
+
+    assert_eq!(s.meta.title, "QR overlay polish"); // 标题在 preview 列
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx"); // file:// URI 解码
+    assert_eq!(s.meta.project_name, "wakefx");
+    // 带 +00:00 偏移的 datetime 必须解析成功(不能落到 0/mtime 兜底)
+    assert_eq!(s.meta.created_at, ms("2026-08-06T13:00:00Z"));
+    assert_eq!(s.meta.message_count, 12); // step_count
+    assert!(s.meta.file_path.ends_with("#ag-0001")); // 虚拟路径
+
+    // 正文加密:唯一一条 System 消息承载 preview 与说明,FTS 搜得到 preview
+    assert_eq!(roles_kinds(&t.mainline), vec![(Role::System, MessageKind::Text)]);
+    assert!(t.mainline[0].text.contains("QR overlay polish"));
+    assert!(t.mainline[0].text.contains("encrypted"));
+    assert_eq!(s.units.len(), 1);
+    assert!(s.units[0].text.contains("QR overlay polish"));
+}
+
 // ---------------------------------------------------------------- seq 契约
 
 /// 跨文件不变量 1:FTS 单元的 seq 必须能在详情页 mainline 中找到同号消息,
@@ -510,7 +815,7 @@ fn assert_seq_contract(adapter: &dyn AgentAdapter, r: &SessionFileRef) {
 }
 
 #[test]
-fn seq_contract_holds_for_all_seven_agents() {
+fn seq_contract_holds_for_all_agents() {
     let env = setup();
     let checks: Vec<(Box<dyn AgentAdapter>, SessionFileRef)> = vec![
         (Box::new(ClaudeAdapter::new()), claude_ref()),
@@ -520,6 +825,11 @@ fn seq_contract_holds_for_all_seven_agents() {
         (Box::new(OpencodeAdapter::new()), db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001")),
         (Box::new(KiroAdapter::new()), kiro_ref()),
         (Box::new(GeminiAdapter::new()), gemini_ref()),
+        (Box::new(PiAdapter::new()), pi_ref(AgentId::Pi)),
+        (Box::new(PiAdapter::omp()), pi_ref(AgentId::Omp)),
+        (Box::new(GrokAdapter::new()), grok_ref()),
+        (Box::new(KimiAdapter::new()), kimi_ref()),
+        (Box::new(AntigravityAdapter::new()), db_ref(AgentId::Antigravity, &env.antigravity_db, "ag-0001")),
     ];
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);

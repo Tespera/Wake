@@ -1,10 +1,14 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod gemini;
+pub mod grok;
+pub mod kimi;
 pub mod kiro;
 pub mod opencode;
+pub mod pi;
 
 pub(crate) mod parse_utils;
 mod sqlite_ro;
@@ -71,6 +75,11 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(opencode::OpencodeAdapter::new()),
         Box::new(kiro::KiroAdapter::new()),
         Box::new(gemini::GeminiAdapter::new()),
+        Box::new(pi::PiAdapter::new()),
+        Box::new(pi::PiAdapter::omp()),
+        Box::new(grok::GrokAdapter::new()),
+        Box::new(kimi::KimiAdapter::new()),
+        Box::new(antigravity::AntigravityAdapter::new()),
     ];
     all.into_iter().filter(|a| a.detect()).collect()
 }

@@ -31,6 +31,7 @@ struct Sidecar {
     title: String,
     created_ms: i64,
     updated_ms: i64,
+    model: Option<String>,
 }
 
 fn read_sidecar(jsonl_path: &Path) -> Sidecar {
@@ -39,6 +40,7 @@ fn read_sidecar(jsonl_path: &Path) -> Sidecar {
         title: String::new(),
         created_ms: 0,
         updated_ms: 0,
+        model: None,
     };
     let json_path = jsonl_path.with_extension("json");
     if let Ok(raw) = fs::read_to_string(&json_path) {
@@ -55,6 +57,12 @@ fn read_sidecar(jsonl_path: &Path) -> Sidecar {
             if let Some(t) = v.get("updated_at").and_then(|x| x.as_str()) {
                 side.updated_ms = iso_ms(t);
             }
+            side.model = v
+                .pointer("/session_state/rts_model_state/model_info/model_id")
+                .or_else(|| v.pointer("/session_state/rts_model_state/model_info/model_name"))
+                .and_then(|x| x.as_str())
+                .filter(|m| !m.is_empty())
+                .map(String::from);
         }
     }
     side
@@ -139,7 +147,7 @@ fn build_meta(r: &SessionFileRef, side: &Sidecar, messages: &[TranscriptMessage]
         message_count: messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64,
         size_bytes: r.size,
         git_branch: None,
-        model: None,
+        model: side.model.clone(),
         tokens_used: None,
         archived: false,
         source: None,

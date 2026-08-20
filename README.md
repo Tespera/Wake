@@ -1,9 +1,11 @@
 # Wake
 
-[![Release](https://img.shields.io/github/v/release/iAmCorey/Wake)](https://github.com/iAmCorey/Wake/releases)
-[![CI](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml/badge.svg)](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml)
-[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-black?logo=apple)](https://github.com/iAmCorey/Wake/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/github/license/iAmCorey/Wake?style=flat-square)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-007AFF?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/iAmCorey/Wake/total?style=flat-square)](https://github.com/iAmCorey/Wake/releases)
+[![Stars](https://img.shields.io/github/stars/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/stargazers)
+[![CI](https://img.shields.io/github/actions/workflow/status/iAmCorey/Wake/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml)
 
 A native macOS app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5).
 
@@ -23,17 +25,25 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and five other p
 
 ## Supported agents
 
-| Agent | Data source |
-|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` |
-| Codex CLI | `~/.codex/sessions` + `state_5.sqlite` (read-only) |
-| Copilot CLI | `~/.copilot/session-store.db` |
-| Cursor (CLI transcripts) | `~/.cursor/projects/**/agent-transcripts` |
-| OpenCode | `~/.local/share/opencode/opencode.db` |
-| Kiro | `~/.kiro/sessions/cli` |
-| Gemini CLI | `~/.gemini/tmp/**/chats` |
+| Agent | Data source | Model | Via |
+|---|---|---|---|
+| Claude Code | `~/.claude/projects/**/*.jsonl` | ✅ | — |
+| Codex CLI | `~/.codex/sessions` + `state_5.sqlite` (read-only) | ✅ | ✅ |
+| Copilot CLI | `~/.copilot/session-store.db` | — | — |
+| Cursor (CLI transcripts) | `~/.cursor/projects/**/agent-transcripts` | — | — |
+| OpenCode | `~/.local/share/opencode/opencode.db` | ✅ | — |
+| OpenCode 2 (`opencode2`, beta) | same DB as v1, new `session_v2` tables | ✅ | — |
+| Kiro | `~/.kiro/sessions/cli` | ✅ | — |
+| Gemini CLI | `~/.gemini/tmp/**/chats` | — | — |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` | ✅ | — |
+| Oh My Pi | `~/.omp/agent/sessions/**/*.jsonl` | ✅ | — |
+| Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
+| Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
+| Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
 
-Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory, and Warp keep sessions in the cloud — none of those are supported.
+**Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — only Codex records this in its local data. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
+
+Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Droid), and Warp keep sessions in the cloud — none of those are supported. Reasonix stores sessions locally but hasn't been mapped yet.
 
 ## Privacy stance
 
@@ -80,6 +90,7 @@ CI runs `cargo test -p wake-core` plus a full app build on every push to main an
 crates/
 ├── wake-core        # pure data layer, no UI dependencies
 │   ├── adapters/    #   claude / codex / copilot / cursor / opencode / kiro / gemini
+│   │                #   pi / omp / grok / kimi / antigravity
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free)
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
@@ -89,6 +100,10 @@ crates/
 ```
 
 Design notes live in [DESIGN.md](DESIGN.md), product decisions in [PRODUCT.md](PRODUCT.md).
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=iAmCorey/Wake&type=date&legend=top-left&sealed_token=ZX5h8laOXIE38b__FRNpP7ae52yRupThIRrcgidF7RI0OOzVcsKIo1iJ_iDp6UcMoxzNCL99N3RY__N7TFUszIgxzljBSBRRiAPYPt9QC9lKf7X3ShAQJg)](https://www.star-history.com/?type=date&repos=iAmCorey%2FWake)
 
 ## License
 

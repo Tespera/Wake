@@ -28,9 +28,9 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Capabilities and Constraints
 
-已实现:七家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(wake-core 16 测试 + CI + pre-commit,合成 fixture)。
+已实现:十二家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(wake-core 20 测试 + CI + pre-commit,合成 fixture)。
 约束:对 agent 数据目录只读;绝不写 Codex 的 SQLite;不读凭证;GPUI 无 SF Symbols(图标用 lucide SVG 自备)。
-已支持七家 agent:Claude Code、Codex、Copilot CLI、Cursor(CLI transcripts)、OpenCode、Kiro、Gemini CLI(2026-08-17 P1 五家落地;Cursor IDE chats 正文加密不做,Windsurf/Trae 加密、Amp/Factory/Warp 云端无本地数据)。
+已支持十二家 agent:Claude Code、Codex、Copilot CLI、Cursor(CLI transcripts)、OpenCode(含 OpenCode 2 beta,2026-08-20 同 adapter 双表支持,v2 会话标 opencode2 徽章)、Kiro、Gemini CLI(2026-08-17 P1 五家落地)+ Pi、Oh My Pi、Grok Build、Kimi Code、Antigravity CLI(2026-08-19 对齐 kooky 内置 roster;Antigravity 正文加密仅元数据卡片)。做不了的:Cursor IDE chats 正文加密,Windsurf/Trae 加密,Amp/Factory(Droid)/Warp 云端无本地数据,Reasonix 本机零会话格式未实测。
 
 ## Brand Commitments
 

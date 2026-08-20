@@ -45,6 +45,14 @@ brands!(
     "opencode-light",
     "kiro",
     "gemini",
+    "pi",
+    "pi-light",
+    "omp",
+    "grok",
+    "grok-light",
+    "kimi",
+    "kimi-light",
+    "antigravity",
 );
 
 icons!(
