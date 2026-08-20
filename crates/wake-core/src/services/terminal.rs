@@ -85,6 +85,8 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
         AgentId::Copilot => Some((vec![format!("--resume={id}")], false)),
         AgentId::Cursor => Some((vec!["--resume".into(), id.into()], false)),
         // 参数形制与 kooky 的 resume 集成一致(空格/等号是各家 CLI 实测约束)
+        // OpenCode 两代 CLI 同为 --session;v2 会话由 session_bin 换 opencode2
+        AgentId::Opencode => Some((vec!["--session".into(), id.into()], false)),
         AgentId::Pi => Some((vec!["--session".into(), id.into()], false)),
         AgentId::Omp => Some((vec!["--resume".into(), id.into()], false)),
         AgentId::Grok => Some((vec!["--resume".into(), id.into()], false)),
