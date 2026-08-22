@@ -1081,10 +1081,21 @@ impl Workbench {
         .detach();
     }
 
-    fn do_resume(&mut self, term: terminal::TerminalApp, window: &mut Window, cx: &mut Context<Self>) {
+    /// remember=false:本次目标是"偏好在这个会话上不可用"时的回退值(见 render
+    /// 里的 terminals_for),点它不该把回退值写成新偏好——否则一个 dsh 会话就能
+    /// 把用户的 Kooky 偏好冲成 Terminal,再回 Claude 会话也回不去了
+    fn do_resume(
+        &mut self,
+        term: terminal::TerminalApp,
+        remember: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(detail) = &self.detail else { return };
-        self.preferred_terminal = Some(term);
-        cx.notify(); // split 按钮左段立即切到本次选择
+        if remember {
+            self.preferred_terminal = Some(term);
+            cx.notify(); // split 按钮左段立即切到本次选择
+        }
         let meta = detail.meta.clone();
         let task = cx.background_spawn(async move { terminal::resume_session_in(&meta, term) });
         Self::notify_when_done(window, cx, task, |outcome| {
@@ -1898,11 +1909,17 @@ impl Workbench {
                                     .gap_1()
                                     .child({
                                         // Open In split 按钮(Codex/kooky 风):左段 = 上次
-                                        // 目标的应用图标,点击直开;右段 chevron 展开列表
-                                        let terms = terminal::installed_terminals();
+                                        // 目标的应用图标,点击直开;右段 chevron 展开列表。
+                                        // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
+                                        // 偏好目标不在列表时(如 dsh 会话 + 偏好 Kooky)回退首项
+                                        let terms = terminal::terminals_for(meta.agent);
                                         let current = self
                                             .preferred_terminal
+                                            .filter(|t| terms.contains(t))
                                             .or_else(|| terms.first().copied());
+                                        // 偏好已存在时 current 要么就是它、要么是回退值,
+                                        // 两种情况点左段都不该改写偏好(见 do_resume)
+                                        let remember_current = self.preferred_terminal.is_none();
                                         let current_icon = current
                                             .and_then(|t| self.terminal_icons.get(t.id()).cloned());
                                         let term_items: Vec<(terminal::TerminalApp, Option<PathBuf>)> =
@@ -1941,9 +1958,18 @@ impl Workbench {
                                                             .text_color(theme.secondary_foreground)
                                                             .into_any_element(),
                                                     })
+                                                    .tooltip({
+                                                        let label: SharedString = match current {
+                                                            Some(t) => format!("Open this session in {}", t.display_name()).into(),
+                                                            None => "Open this session".into(),
+                                                        };
+                                                        move |window, cx| {
+                                                            gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                                                        }
+                                                    })
                                                     .on_click(cx.listener(move |this, _, window, cx| {
                                                         if let Some(term) = current {
-                                                            this.do_resume(term, window, cx);
+                                                            this.do_resume(term, remember_current, window, cx);
                                                         }
                                                     })),
                                             )
@@ -1991,7 +2017,7 @@ impl Workbench {
                                                                 })
                                                                 .on_click(move |_, window, cx| {
                                                                     entity.update(cx, |this, cx| {
-                                                                        this.do_resume(term, window, cx);
+                                                                        this.do_resume(term, true, window, cx);
                                                                     });
                                                                 }),
                                                             );

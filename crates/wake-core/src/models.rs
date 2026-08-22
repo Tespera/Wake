@@ -1,21 +1,22 @@
 use serde::{Deserialize, Serialize};
 
 /// 变体声明序即侧栏固定展示序(derive Ord 直接按此序比较)——
-/// 新增 agent 一律追加在末尾,老条目位置不动
+/// 顺序为用户指定(2026-08-20),新增 agent 问过用户再定位置,勿擅动老条目
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentId {
     ClaudeCode,
     Codex,
-    Copilot,
+    Grok,
+    Dsh,
     Cursor,
     Opencode,
-    Kiro,
-    Gemini,
     Pi,
     Omp,
-    Grok,
+    Kiro,
     Kimi,
+    Gemini,
+    Copilot,
     Antigravity,
 }
 
@@ -34,6 +35,7 @@ impl AgentId {
             AgentId::Grok => "grok",
             AgentId::Kimi => "kimi",
             AgentId::Antigravity => "antigravity",
+            AgentId::Dsh => "dsh",
         }
     }
 
@@ -51,6 +53,7 @@ impl AgentId {
             "grok" => Some(AgentId::Grok),
             "kimi" => Some(AgentId::Kimi),
             "antigravity" => Some(AgentId::Antigravity),
+            "dsh" => Some(AgentId::Dsh),
         _ => None,
         }
     }
@@ -69,6 +72,7 @@ impl AgentId {
             AgentId::Grok => "Grok Build",
             AgentId::Kimi => "Kimi Code",
             AgentId::Antigravity => "Antigravity CLI",
+            AgentId::Dsh => "DeepSeek Harness",
         }
     }
 
@@ -103,6 +107,7 @@ impl AgentId {
                 if dark { "brands/kimi.png" } else { "brands/kimi-light.png" }
             }
             AgentId::Antigravity => "brands/antigravity.png",
+            AgentId::Dsh => "brands/deepseek.png",
         }
     }
 

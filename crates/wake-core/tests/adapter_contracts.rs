@@ -1,5 +1,6 @@
-//! 十二家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
-//! fixture 为全合成数据(tests/fixtures/,SQLite 型在临时 HOME 里现建)。
+//! 十三家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
+//! fixture 为全合成数据(tests/fixtures/,SQLite 型在临时 HOME 里现建,
+//! dsh 的 zstd 日志由检入的明文 fixture 在临时 HOME 里压制)。
 //!
 //! Copilot/OpenCode/Antigravity 的 parse 只认各自 HOME 下的库,Gemini 的 cwd
 //! 反查读 `~/.gemini/projects.json`,Kimi 的 cwd 反查读
@@ -17,6 +18,7 @@ use wake_core::adapters::claude::ClaudeAdapter;
 use wake_core::adapters::codex::CodexAdapter;
 use wake_core::adapters::copilot::CopilotAdapter;
 use wake_core::adapters::cursor::CursorAdapter;
+use wake_core::adapters::dsh::DshAdapter;
 use wake_core::adapters::gemini::GeminiAdapter;
 use wake_core::adapters::grok::GrokAdapter;
 use wake_core::adapters::kimi::KimiAdapter;
@@ -32,6 +34,7 @@ struct TestEnv {
     copilot_db: PathBuf,
     opencode_db: PathBuf,
     antigravity_db: PathBuf,
+    dsh_log: PathBuf,
     /// 假 HOME 目录本体,持有 TempDir 保证整个测试进程期间不被清理
     _home: tempfile::TempDir,
 }
@@ -83,11 +86,36 @@ fn setup() -> &'static TestEnv {
         )
         .expect("write kimi session_index");
 
+        // dsh:检入的明文 fixture 压成真实写端布局的 zstd 多帧文件(首帧 header
+        // 行、次帧事件批,帧直接连接),另放一个子代理会话验证 file_ref 过滤
+        let dsh_project = home.path().join(".dsh").join("sessions").join("--Users-tester-Github-wakefx--");
+        let dsh_sess = dsh_project.join("dsh-e2e4-0001");
+        fs::create_dir_all(&dsh_sess).expect("mkdir dsh session dir");
+        let plain = fs::read_to_string(fixture("dsh/session.jsonl")).expect("read dsh fixture");
+        let (header, body) = plain.split_once('\n').expect("dsh fixture header line");
+        let mut frames = zstd::encode_all(format!("{header}\n").as_bytes(), 3).expect("zstd header frame");
+        frames.extend(zstd::encode_all(body.as_bytes(), 3).expect("zstd event frame"));
+        let dsh_log = dsh_sess.join("session.jsonl.zstd");
+        fs::write(&dsh_log, frames).expect("write dsh zstd log");
+        let dsh_sub = dsh_project.join("dsh-sub-0002");
+        fs::create_dir_all(&dsh_sub).expect("mkdir dsh subagent dir");
+        fs::write(
+            dsh_sub.join("session.jsonl"),
+            concat!(
+                r#"{"type":"session","version":0,"id":"dsh-sub-0002","createdAt":1786100000000,"cwd":"/Users/tester/Github/wakefx","origin":"subagent","delegationDepth":1}"#,
+                "\n",
+                r#"{"type":"user/message","seq":0,"time":1786100001000,"data":{"id":"m","role":"user","content":[{"type":"text","text":"child task"}],"source":{"kind":"user"}}}"#,
+                "\n",
+            ),
+        )
+        .expect("write dsh subagent log");
+
         std::env::set_var("HOME", home.path());
         TestEnv {
             copilot_db,
             opencode_db,
             antigravity_db,
+            dsh_log,
             _home: home,
         }
     })
@@ -815,6 +843,109 @@ fn assert_seq_contract(adapter: &dyn AgentAdapter, r: &SessionFileRef) {
 }
 
 #[test]
+fn dsh_torn_final_frame_terminates() {
+    // 半写的末帧:写端每次 append 一帧,扫描与 dsh 天然并发,必然读到。
+    // zstd decoder 对断尾**反复**返回 UnexpectedEof 而非 EOF——解析器不就地
+    // 收尾就是死循环:扫描线程打满 CPU、ScanFinale 永不 Drop、刷新弹窗按
+    // 不变量 6 永久锁死。独立 tempdir,不进 list 以免扰动 dsh_parse_contract
+    let env = setup();
+    let full = fs::read(&env.dsh_log).expect("read dsh zstd log");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let torn = dir.path().join("session.jsonl.zstd");
+    fs::write(&torn, &full[..full.len() - 12]).expect("write torn log");
+
+    let adapter = DshAdapter::new();
+    // header 在首帧、完整,所以断尾会话照常进列表(只是内容截止到断点)
+    let r = adapter.file_ref(&torn).expect("torn file_ref");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(DshAdapter::new().parse_transcript(&r).is_ok()).ok();
+    });
+    let ok = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("断尾帧把解析器卡住了(死循环)");
+    assert!(ok, "断尾应优雅收尾,不是把整个会话判失败");
+}
+
+#[test]
+fn dsh_parse_contract() {
+    let env = setup();
+    let adapter = DshAdapter::new();
+    // file_ref 是公开 API:只认 session.jsonl[.zstd],native_id 取 header 的
+    // 权威 id(目录名是转义过的 id);子代理会话(origin=subagent)在此过滤
+    let r = adapter.file_ref(&env.dsh_log).expect("dsh file_ref");
+    assert_eq!(r.native_id, "dsh-e2e4-0001");
+    let sub = env
+        .dsh_log
+        .parent()
+        .and_then(|d| d.parent())
+        .expect("dsh project dir")
+        .join("dsh-sub-0002")
+        .join("session.jsonl");
+    assert!(adapter.file_ref(&sub).is_none(), "子代理会话不进列表");
+
+    // list 走 <project>/<session>/session.jsonl[.zstd] 两层布局,子代理被滤掉
+    let listed = adapter.list_session_files().expect("dsh list_session_files");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].native_id, "dsh-e2e4-0001");
+
+    // 压缩配置换挡会两后缀并存:陈旧的一份在 file_ref 就让位(裁决单点,
+    // watcher 入口同样受保护,不会把旧文件当主文件解析)
+    let stale = env.dsh_log.with_file_name("session.jsonl");
+    fs::write(&stale, "{\"type\":\"session\",\"version\":0,\"id\":\"dsh-e2e4-0001\",\"createdAt\":1786000000000,\"cwd\":\"/Users/tester/Github/wakefx\",\"delegationDepth\":0}\n")
+        .expect("write stale sibling");
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&stale)
+        .and_then(|f| f.set_modified(hour_ago))
+        .expect("age stale sibling");
+    assert!(adapter.file_ref(&stale).is_none(), "陈旧 sibling 应让位");
+    assert!(adapter.file_ref(&env.dsh_log).is_some(), "较新主文件不受影响");
+    fs::remove_file(&stale).expect("remove stale sibling");
+
+    let s = adapter.parse_session(&r).expect("dsh parse_session");
+    let t = adapter.parse_transcript(&r).expect("dsh parse_transcript");
+
+    assert_eq!(s.meta.title, "QR scan dependency fix"); // session/title 事件 last-wins
+    assert_eq!(s.meta.key, "dsh:dsh-e2e4-0001");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx"); // header cwd,不反推目录名
+    assert_eq!(s.meta.model.as_deref(), Some("deepseek-chat-v4")); // assistant source.model
+    // usage 是"one model call"的账,按调用累加(1480 + 1560 + 空载体 400)。
+    // surfaceOp={op:replace} 那条是 compaction 的缩短版:整条跳过,它挂的
+    // 99999 不计——它不是新的模型调用,原始节点也不该被它遮蔽
+    assert_eq!(s.meta.tokens_used, Some(3440));
+    assert_eq!(s.meta.created_at, 1786100000000); // header createdAt(epoch ms)
+    assert_eq!(s.meta.updated_at, 1786100007000); // 最后事件 time
+    assert_eq!(s.meta.message_count, 2); // 注入上下文归 Meta 不计;replace/空载体都不产生气泡
+    assert_eq!(s.unknown_line_count, 1); // mystery-row;*-chunks 打包行与 turn/step 边界不计
+
+    // 连续 assistant step(中间只隔 tool/result)合并一条;source.kind 非 "user"
+    // 的注入上下文(plugin / agent-instructions,后者不带 system-reminder 壳)归 Meta
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Meta),
+            (Role::User, MessageKind::Meta),
+        ]
+    );
+    let a = &t.mainline[1];
+    assert!(a.text.starts_with("我先查一下扫码组件"));
+    assert!(a.text.contains("依赖数组漏了 device"));
+    // reasoning 块分离进 thinking,不混入正文
+    assert!(a.thinking.as_deref().unwrap_or_default().contains("依赖数组遗漏"));
+    assert!(!a.text.contains("crash on unmount"));
+    assert_eq!(a.tool_calls.len(), 1);
+    assert_eq!(a.tool_calls[0].name, "read_file");
+    // tool/result 事件按 toolCallId 回填输出
+    assert!(a.tool_calls[0].output.as_deref().unwrap_or_default().contains("useEffect"));
+    assert!(!a.tool_calls[0].is_error);
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 1]);
+}
+
+#[test]
 fn seq_contract_holds_for_all_agents() {
     let env = setup();
     let checks: Vec<(Box<dyn AgentAdapter>, SessionFileRef)> = vec![
@@ -830,6 +961,7 @@ fn seq_contract_holds_for_all_agents() {
         (Box::new(GrokAdapter::new()), grok_ref()),
         (Box::new(KimiAdapter::new()), kimi_ref()),
         (Box::new(AntigravityAdapter::new()), db_ref(AgentId::Antigravity, &env.antigravity_db, "ag-0001")),
+        (Box::new(DshAdapter::new()), fs_ref(AgentId::Dsh, &env.dsh_log, "dsh-e2e4-0001")),
     ];
     for (adapter, r) in &checks {
         assert_seq_contract(adapter.as_ref(), r);

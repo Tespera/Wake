@@ -3,6 +3,7 @@ pub mod claude;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
+pub mod dsh;
 pub mod gemini;
 pub mod grok;
 pub mod kimi;
@@ -23,7 +24,9 @@ pub trait AgentAdapter: Send + Sync {
     fn agent(&self) -> AgentId;
     /// 数据根目录是否存在
     fn detect(&self) -> bool;
-    /// 枚举全部会话文件(只 stat 不读内容)
+    /// 枚举全部会话文件。契约是"枚举必须廉价、绝不做全量解析":多数家纯 stat,
+    /// SQLite 型跑元数据查询,dsh 读有界首行(子代理标志只存在于文件头)。
+    /// 故障就地降级为空列表,不外溢炸掉整轮扫描。
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>>;
     /// watcher 事件路径 → 本 adapter 的会话文件引用;None = 非会话文件
     /// (边车、子代理转录等)。默认:非空 .jsonl,stem 即 native_id。
@@ -80,6 +83,7 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(grok::GrokAdapter::new()),
         Box::new(kimi::KimiAdapter::new()),
         Box::new(antigravity::AntigravityAdapter::new()),
+        Box::new(dsh::DshAdapter::new()),
     ];
     all.into_iter().filter(|a| a.detect()).collect()
 }

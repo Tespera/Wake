@@ -53,6 +53,7 @@ brands!(
     "kimi",
     "kimi-light",
     "antigravity",
+    "deepseek",
 );
 
 icons!(

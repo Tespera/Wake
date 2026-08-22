@@ -9,7 +9,7 @@
 
 A native macOS app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5).
 
-Your agent history is scattered across `~/.claude`, `~/.codex`, and nine other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
+Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
 ![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
 
@@ -40,6 +40,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and nine other p
 | Grok Build | `~/.grok/sessions/**/updates.jsonl` | ✅ | — |
 | Kimi Code | `~/.kimi-code/sessions/**/wire.jsonl` | — | — |
 | Antigravity CLI | `~/.gemini/antigravity-cli/conversation_summaries.db` (metadata only — transcripts are encrypted) | — | — |
+| DeepSeek Harness (`dsh`) | `~/.dsh/sessions/**/session.jsonl[.zstd]` (zstd-compressed logs are decoded transparently) | ✅ | — |
 
 **Model** = whether Wake shows which LLM a session used (the model the session last used). **Via** = whether Wake shows where the session was started from (CLI, IDE extension, desktop app) — only Codex records this in its local data. A "—" means the agent's local data simply doesn't record that field, not a missing feature.
 
@@ -90,7 +91,7 @@ CI runs `cargo test -p wake-core` plus a full app build on every push to main an
 crates/
 ├── wake-core        # pure data layer, no UI dependencies
 │   ├── adapters/    #   claude / codex / copilot / cursor / opencode / kiro / gemini
-│   │                #   pi / omp / grok / kimi / antigravity
+│   │                #   pi / omp / grok / kimi / antigravity / dsh
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free)
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
