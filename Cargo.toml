@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/wake-core", "crates/wake"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 
@@ -16,6 +16,7 @@ dirs = "5"
 walkdir = "2"
 notify = "7"
 chrono = { version = "0.4", features = ["serde"] }
+zstd = "0.13"
 
 [profile.dev]
 # gpui 依赖树巨大,dev 依赖开优化让 UI 不卡

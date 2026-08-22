@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.2] — 2026-08-22
+
+- New: DeepSeek Harness (`dsh`) support — 13 agents total, resumable, with its compressed session logs read transparently
+- Update: sidebar agent order
+- Update: the Open In button now names the app it will open
+
 ## [0.2.1] — 2026-08-20
 
 - Fix: resuming OpenCode sessions in your terminal now works (broken in the 0.2.0 build)
