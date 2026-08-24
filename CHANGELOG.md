@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5] — 2026-08-25
+
+- New: experimental Linux support — browse, search and resume sessions on Linux desktops; prebuilt arm64 packages (.deb and tar.gz) attached to the release
+- New: on Linux, resume opens sessions in GNOME Terminal, Console, Konsole, Ghostty, kitty, Alacritty, WezTerm, Xfce Terminal or XTerm
+- New: keyboard shortcuts follow the platform — ⌘ on macOS, Ctrl on Linux
+- Fix: resume failure notices only say "copied to clipboard" when the copy really happened; otherwise the command is shown in the message
+
 ## [0.2.4] — 2026-08-24
 
 - New: Session locations is now a full manager — every location, built-in or custom, can be edited, removed, or pointed at a different folder
