@@ -45,7 +45,7 @@ use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
 use crate::ui::*;
-use crate::format::{abs_date, display_file_path, fmt_tokens, one_line, relative_time};
+use crate::format::{abs_date, display_file_path, fmt_tokens, one_line, relative_time, tilde_path};
 
 actions!(wake, [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]);
 
@@ -410,6 +410,20 @@ pub struct Workbench {
     _subs: Vec<Subscription>,
 }
 
+/// "Session locations" 面板的一行(= 一个数据源路径)。文本字段一律
+/// SharedString:dialog builder 每帧重跑,clone 只该是 refcount 而非堆分配
+struct DataSourceRow {
+    agent: AgentId,
+    /// `~/…` 展示形态
+    display: SharedString,
+    /// 原始完整路径,交给 Finder
+    raw: SharedString,
+    /// 会话数,或路径不可用时的状态词
+    tally: SharedString,
+    /// 路径当前存在(行是否可点)
+    exists: bool,
+}
+
 impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let db_path = wake_core::db::default_db_path();
@@ -642,6 +656,149 @@ impl Workbench {
                                 .child(note),
                         ),
                 )
+        });
+    }
+
+    /// "Wake 读哪些路径"面板(侧栏底部数据源钮)。列全十三家含本机没装的,
+    /// 呼应"只读你的目录、零网络"的产品承诺。数据在打开前一次算好 move 进
+    /// 闭包——dialog builder 在宿主 render 期间执行,闭包内 read 宿主 entity
+    /// 必 double-lease panic
+    fn show_data_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 数据源**必须**读 self.adapters——与 scanner/watcher/refresh 同一份
+        // 实例。根路径是构造时刻对 env(CODEX_HOME/XDG_DATA_HOME)与文件系统
+        // 的快照,二次构造(旧 all_data_sources 的做法)可能解析出不同的根,
+        // 面板就会展示一个本次会话根本不会读的路径——连着几轮 review 修的
+        // 都是这一个根因的不同投影;同一份实例下不一致没有存在空间。
+        // 先摊平成"一路径一行",prefixes 与各行由**同一份** flat 派生:两次
+        // 独立 flat_map 再按位置 zip 计数,靠的是遍历顺序一致这条隐形契约。
+        // 文本一律预先算成 SharedString:dialog builder 存的是 Rc<dyn Fn>,
+        // 面板开着时每帧重跑,留 format!/String::clone 在里面就是每帧堆分配
+        let flat: Vec<(AgentId, PathBuf)> = self
+            .adapters
+            .iter()
+            .flat_map(|a| {
+                let agent = a.agent();
+                a.data_roots().into_iter().map(move |r| (agent, r))
+            })
+            .collect();
+        // 带上 agent:计数按 (agent, 根) 归属,不然一家的根被 env 搬进另一家
+        // 树下时,会话会整批记到别家行上
+        let prefixes: Vec<(String, String)> = flat
+            .iter()
+            .map(|(a, r)| (a.as_str().to_string(), r.to_string_lossy().to_string()))
+            .collect();
+        let counts = self
+            .store
+            .counts_by_path_prefix(&prefixes)
+            .unwrap_or_else(|_| vec![0; prefixes.len()]);
+        let rows: Vec<DataSourceRow> = flat
+            .iter()
+            .zip(prefixes)
+            .zip(counts)
+            .map(|(((agent, root), (_, raw)), n)| {
+                // 存在性逐路径判断:某家的归档目录可能还没建,不该按整家一刀切
+                let exists = root.exists();
+                DataSourceRow {
+                    agent: *agent,
+                    display: tilde_path(&raw).into(),
+                    raw: raw.into(),
+                    tally: if exists { n.to_string().into() } else { "Not found".into() },
+                    exists,
+                }
+            })
+            .collect();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            // 左右内边距从默认 24 收到 14,让出的 10px 由标题与各行自己的
+            // px(10) 补回:内容绝对位置不变,而 hover 底色能向外铺满这 10px。
+            // 早先用容器负 margin 做,被 overflow_y_scroll 的裁剪吃掉了
+            dialog.w(px(620.)).pl(px(14.)).pr(px(14.)).child(
+                v_flex()
+                    .gap(SPACE_SM)
+                    .child(
+                        // 显式收行高:默认按 1.5 倍算,16px 标题会撑出 24px 的块,
+                        // 上下白边把标题与列表推得过开
+                        div()
+                            .px(px(10.))
+                            .text_size(FONT_HEADING)
+                            .line_height(px(20.))
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .child("Session locations"),
+                    )
+                    .child(
+                        v_flex()
+                            .id("data-source-list")
+                            .max_h(px(400.))
+                            .overflow_y_scroll()
+                            .children(rows.iter().enumerate().map(|(ix, row)| {
+                                let raw = row.raw.clone();
+                                h_flex()
+                                    .id(("data-source-row", ix))
+                                    .h(ROW_HEIGHT_SUB)
+                                    .w_full()
+                                    // 行内 padding + dialog 让出的等量边距:hover
+                                    // 底色左右各留 10px 呼吸,内容仍与标题左对齐
+                                    .px(px(10.))
+                                    .rounded(theme.radius)
+                                    .gap(SPACE_SM)
+                                    .items_center()
+                                    .when(row.exists, |el| {
+                                        el.cursor_pointer()
+                                            .hover(|s| s.bg(theme.secondary_hover))
+                                            .on_click(move |_, _, _| {
+                                                terminal::open_in_finder(&raw)
+                                            })
+                                    })
+                                    .child(
+                                        img(row.agent.brand_icon(theme.mode.is_dark()))
+                                            .size(px(14.))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(118.))
+                                            .flex_shrink_0()
+                                            .truncate()
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.foreground)
+                                            .child(row.agent.display_name()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(FONT_CAPTION)
+                                            .text_color(theme.muted_foreground)
+                                            .child(row.display.clone()),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .w(px(88.))
+                                            .flex_shrink_0()
+                                            .justify_end()
+                                            .text_size(FONT_LABEL)
+                                            .child({
+                                                // 有目录取中性灰(同项目名 badge);目录不在
+                                                // 取 warning 淡底 tint——这是"本机没这家"的
+                                                // 陈述而非报错,不用实心告警色。文字实色,
+                                                // 只有底叠 opacity
+                                                // 有目录取中性灰(同项目名 badge);目录不在
+                                                // 取 warning 淡底 tint——这是"本机没这家"的
+                                                // 陈述而非报错,不用实心告警色。文字实色,
+                                                // 只有底叠 opacity
+                                                let (bg, fg) = if row.exists {
+                                                    (theme.muted, theme.muted_foreground)
+                                                } else {
+                                                    (theme.warning.opacity(0.14), theme.warning)
+                                                };
+                                                badge(row.tally.clone(), bg, fg)
+                                            }),
+                                    )
+                            })),
+                    ),
+            )
         });
     }
 
@@ -1369,40 +1526,6 @@ impl Workbench {
                                         .child("⌘K"),
                                 ),
                         )
-                        .child({
-                            let busy = self.scan.scanning;
-                            div()
-                                .id("refresh")
-                                .size(ROW_HEIGHT)
-                                .flex_shrink_0()
-                                .rounded(theme.radius)
-                                .bg(theme.secondary)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(theme.muted_foreground)
-                                .when(!busy, |el| {
-                                    el.cursor_pointer()
-                                        .hover(|s| {
-                                            s.bg(theme.secondary_hover)
-                                                .text_color(theme.foreground)
-                                        })
-                                        .active(|s| {
-                                            s.bg(theme.secondary_active)
-                                                .text_color(theme.foreground)
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.refresh_sessions(window, cx)
-                                        }))
-                                })
-                                .child(if busy {
-                                    Spinner::new().small().into_any_element()
-                                } else {
-                                    icon("icons/refresh-cw.svg")
-                                        .with_size(px(14.))
-                                        .into_any_element()
-                                })
-                        }),
                 ),
             )
             .child(
@@ -1522,18 +1645,57 @@ impl Workbench {
                         }))
                     }),
             )
-            .when_some(status, |this, status| {
-                this.child(
-                    h_flex()
-                        .flex_shrink_0()
-                        .px(SPACE_XL)
-                        .py_3()
-                        .border_t_1()
-                        .border_color(theme.sidebar_border)
-                        .text_size(FONT_LABEL)
-                        .child(status),
-                )
-            })
+            // 底部工具条:次要操作(数据源、刷新)与扫描状态同处一区,与上方
+            // 导航行只用一条 border 分隔。按钮透明底、hover 才出色,不跟导航
+            // 行的选中态抢注意力;图标-only 元素改 text_color 不丢字号
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .border_t_1()
+                    .border_color(theme.sidebar_border)
+                    .when_some(status, |this, status| {
+                        this.child(
+                            h_flex().px(SPACE_XL).pt(SPACE_MD).text_size(FONT_LABEL).child(status),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .px(SIDEBAR_EDGE)
+                            .py(SPACE_SM)
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
+                            .child(sidebar_tool_btn(
+                                "data-sources",
+                                "Session locations",
+                                // 扫描期间禁用:面板的计数是打开那一刻查库所得、
+                                // 之后不再跟进(dialog builder 里是静态 rows),
+                                // 首扫途中开出来会是 0 或半截数字且一直不更新
+                                !self.scan.scanning,
+                                icon("icons/hard-drive.svg").with_size(px(14.)).into_any_element(),
+                                cx.listener(|this, _, window, cx| {
+                                    this.show_data_sources(window, cx)
+                                }),
+                                cx,
+                            ))
+                            .child(sidebar_tool_btn(
+                                "refresh",
+                                "Refresh sessions",
+                                !self.scan.scanning,
+                                if self.scan.scanning {
+                                    Spinner::new().small().into_any_element()
+                                } else {
+                                    icon("icons/refresh-cw.svg")
+                                        .with_size(px(14.))
+                                        .into_any_element()
+                                },
+                                cx.listener(|this, _, window, cx| {
+                                    this.refresh_sessions(window, cx)
+                                }),
+                                cx,
+                            )),
+                    ),
+            )
     }
 
     fn render_session_list(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1551,7 +1713,7 @@ impl Workbench {
         let sort_menu = Button::new("sort-sessions")
             .ghost()
             .small()
-            .rounded(px(6.))
+            .rounded(RADIUS_BUTTON)
             .icon(icon("icons/arrow-up-down.svg").with_size(px(13.)))
             .label(sort_label)
             .tooltip("Sort sessions")
@@ -1667,7 +1829,7 @@ impl Workbench {
                         div()
                             .max_w(px(540.))
                             .min_w_0()
-                            .rounded(px(12.))
+                            .rounded(theme.radius_lg)
                             .bg(theme.muted)
                             .px(px(12.))
                             .py(px(7.))
@@ -1808,7 +1970,7 @@ impl Workbench {
         let delete_entity = export_entity.clone();
         let more_menu = Button::new("more-actions")
             .ghost()
-            .rounded(px(6.))
+            .rounded(RADIUS_BUTTON)
             .icon(icon("icons/more-horizontal.svg").with_size(px(16.)))
             .dropdown_menu(move |menu, _, _| {
                 let export_entity = export_entity.clone();
@@ -1934,7 +2096,7 @@ impl Workbench {
                                         // 右段 Button 用 custom variant 与左段 hover 完全一致
                                         h_flex()
                                             .h(px(28.))
-                                            .rounded(px(6.))
+                                            .rounded(RADIUS_BUTTON)
                                             .border_1()
                                             .border_color(theme.border)
                                             .bg(theme.secondary)
@@ -2395,7 +2557,7 @@ fn tool_cluster(
                                 .min_w_0()
                                 .px(px(8.))
                                 .py(px(5.))
-                                .rounded(px(5.))
+                                .rounded(RADIUS_KBD)
                                 .bg(theme.muted)
                                 .text_size(FONT_LABEL)
                                 .font_family(mono.clone())
@@ -2419,7 +2581,7 @@ fn badge(name: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> impl IntoElement 
         .min_w_0()
         .px(px(6.))
         .py(px(1.))
-        .rounded(px(4.))
+        .rounded(RADIUS_BADGE)
         .bg(bg)
         .text_color(fg)
         .font_medium()
@@ -2432,12 +2594,45 @@ fn outline_badge(name: impl Into<SharedString>, color: Hsla) -> impl IntoElement
         .min_w_0()
         .px(px(6.))
         .py(px(1.))
-        .rounded(px(4.))
+        .rounded(RADIUS_BADGE)
         .border_1()
         .border_color(color)
         .text_color(color)
         .font_medium()
         .child(div().truncate().child(name.into()))
+}
+
+/// 侧栏底部工具条的图标按钮。透明底、hover 才出色——底部是次要操作区,
+/// 不与导航行的选中态抢注意力;图标-only 元素改 text_color 不丢字号。
+/// enabled=false(刷新进行中)只留静态内容,连 tooltip 与点击一起摘掉
+fn sidebar_tool_btn(
+    id: &'static str,
+    tooltip: &'static str,
+    enabled: bool,
+    content: AnyElement,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &Context<Workbench>,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .size(ROW_HEIGHT)
+        .flex_shrink_0()
+        .rounded(theme.radius)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(theme.muted_foreground)
+        .when(enabled, |el| {
+            el.cursor_pointer()
+                .hover(|s| s.bg(theme.secondary_hover).text_color(theme.foreground))
+                .active(|s| s.bg(theme.secondary_active))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx)
+                })
+                .on_click(on_click)
+        })
+        .child(content)
 }
 
 /// Things 风源列表行:图标 + 文字 + 计数,6px 圆角选中胶囊
@@ -2515,12 +2710,17 @@ fn sidebar_row(
                         .child(label.into()),
                 )
                 .when_some(count, |this, n| {
+                    // 与 Session locations 面板同款胶囊。底色随行态切换而不是
+                    // 固定 muted:常态行底是 sidebar,用 accent 衬;选中行底本身
+                    // 就是 accent,退回 sidebar 材质反衬。固定 muted 会在浅色
+                    // 常态(#E8E8E5 vs #EDEDEA)和深色选中(#323230 vs #343432)
+                    // 两处糊进背景里
+                    let bg = if active { theme.sidebar } else { theme.sidebar_accent };
                     this.child(
                         div()
                             .flex_shrink_0()
                             .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(n.to_string()),
+                            .child(badge(n.to_string(), bg, theme.muted_foreground)),
                     )
                 }),
         )
@@ -2544,7 +2744,7 @@ fn tool_btn(
     };
     Button::new(id)
         .ghost()
-        .rounded(px(6.))
+        .rounded(RADIUS_BUTTON)
         .icon(ic)
         .tooltip(tooltip)
         .on_click(on_click)

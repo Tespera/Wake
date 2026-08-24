@@ -376,10 +376,6 @@ impl AgentAdapter for DshAdapter {
         AgentId::Dsh
     }
 
-    fn detect(&self) -> bool {
-        self.root.is_dir()
-    }
-
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = Vec::new();
         // 固定两层:<project-dir>/<session-dir>/session.jsonl[.zstd],
@@ -468,11 +464,7 @@ impl AgentAdapter for DshAdapter {
         }
     }
 
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        if self.detect() {
-            vec![self.root.clone()]
-        } else {
-            Vec::new()
-        }
+    fn data_roots(&self) -> Vec<PathBuf> {
+        vec![self.root.clone()]
     }
 }

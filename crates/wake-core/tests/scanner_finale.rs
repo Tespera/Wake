@@ -28,9 +28,6 @@ impl AgentAdapter for FailingAdapter {
     fn agent(&self) -> AgentId {
         AgentId::ClaudeCode
     }
-    fn detect(&self) -> bool {
-        true
-    }
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         bail!("simulated data source failure")
     }
@@ -40,8 +37,8 @@ impl AgentAdapter for FailingAdapter {
     fn parse_transcript(&self, _: &SessionFileRef) -> Result<ParsedTranscript> {
         bail!("unreachable")
     }
-    fn watch_paths(&self) -> Vec<std::path::PathBuf> {
-        Vec::new()
+    fn data_roots(&self) -> Vec<std::path::PathBuf> {
+        vec![std::path::PathBuf::from("/nonexistent/test-adapter")]
     }
 }
 
@@ -91,9 +88,6 @@ impl AgentAdapter for SeedAdapter {
     fn agent(&self) -> AgentId {
         AgentId::Codex
     }
-    fn detect(&self) -> bool {
-        true
-    }
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         Ok(vec![self.r.clone()])
     }
@@ -115,8 +109,8 @@ impl AgentAdapter for SeedAdapter {
     fn parse_transcript(&self, _: &SessionFileRef) -> Result<ParsedTranscript> {
         bail!("transcript not needed in scan")
     }
-    fn watch_paths(&self) -> Vec<std::path::PathBuf> {
-        Vec::new()
+    fn data_roots(&self) -> Vec<std::path::PathBuf> {
+        vec![std::path::PathBuf::from("/nonexistent/test-adapter")]
     }
 }
 

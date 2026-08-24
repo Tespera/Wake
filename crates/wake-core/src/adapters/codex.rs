@@ -18,7 +18,12 @@ pub struct CodexAdapter {
 
 impl CodexAdapter {
     pub fn new() -> Self {
-        let root = dirs::home_dir().unwrap_or_default().join(".codex");
+        // codex 认 CODEX_HOME(kooky 的 CodexUsageMonitor 同样处理)。
+        // 采信前探真会话目录而不是只看根目录在不在——后者会让 CODEX_HOME
+        // 指向空目录的机器整家会话凭空消失(与 opencode 探库文件同一规则)
+        let root = super::env_dir("CODEX_HOME")
+            .filter(|p| p.join("sessions").is_dir() || p.join("archived_sessions").is_dir())
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"));
         Self {
             sessions_dir: root.join("sessions"),
             archived_dir: root.join("archived_sessions"),
@@ -433,10 +438,6 @@ impl AgentAdapter for CodexAdapter {
         AgentId::Codex
     }
 
-    fn detect(&self) -> bool {
-        self.sessions_dir.is_dir() || self.archived_dir.is_dir()
-    }
-
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = list_jsonl_refs(&self.sessions_dir, AgentId::Codex, rollout_native_id);
         refs.extend(list_jsonl_refs(&self.archived_dir, AgentId::Codex, rollout_native_id));
@@ -546,14 +547,7 @@ impl AgentAdapter for CodexAdapter {
         })
     }
 
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        let mut v = Vec::new();
-        if self.sessions_dir.is_dir() {
-            v.push(self.sessions_dir.clone());
-        }
-        if self.archived_dir.is_dir() {
-            v.push(self.archived_dir.clone());
-        }
-        v
+    fn data_roots(&self) -> Vec<PathBuf> {
+        vec![self.sessions_dir.clone(), self.archived_dir.clone()]
     }
 }

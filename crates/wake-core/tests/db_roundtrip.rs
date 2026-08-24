@@ -133,3 +133,34 @@ fn list_sessions_filters_and_counts() {
     assert_eq!(total, 1);
     assert_eq!(sessions[0].key, "codex:s5");
 }
+
+#[test]
+fn path_counts_respect_agent_and_boundary() {
+    // Session locations 面板的计数按数据根归属。两条真实风险:
+    // ① 自定义 CODEX_HOME/XDG_DATA_HOME 可以落在别家根之下,只比路径前缀
+    //    不看 agent,会把这家的会话整批记到别家行上;
+    // ② 裸 starts_with 没有边界,`…/sessions` 会连 `…/sessions-old` 一起吞。
+    let (_d, store) = temp_store();
+    let mut claude = meta("claude-code:a", "claude one");
+    claude.file_path = "/home/u/.claude/projects/a.jsonl".into();
+    // codex 的根被搬进了 claude 的树下(CODEX_HOME 允许这么设)
+    let mut codex = meta("codex:b", "codex one");
+    codex.agent = AgentId::Codex;
+    codex.file_path = "/home/u/.claude/projects/codex/sessions/b.jsonl".into();
+    // 同名前缀的兄弟目录:不该算进 `…/sessions`
+    let mut sibling = meta("codex:c", "codex sibling");
+    sibling.agent = AgentId::Codex;
+    sibling.file_path = "/home/u/.claude/projects/codex/sessions-old/c.jsonl".into();
+    store
+        .write_meta_only(&[(claude, 0), (codex, 0), (sibling, 0)])
+        .expect("seed sessions");
+
+    let counts = store
+        .counts_by_path_prefix(&[
+            ("claude-code".into(), "/home/u/.claude/projects".into()),
+            ("codex".into(), "/home/u/.claude/projects/codex/sessions".into()),
+        ])
+        .expect("counts");
+    assert_eq!(counts[0], 1, "codex 的会话不该被记到 claude 行");
+    assert_eq!(counts[1], 1, "sessions-old 不该算进 sessions");
+}

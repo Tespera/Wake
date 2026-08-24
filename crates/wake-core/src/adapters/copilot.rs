@@ -178,10 +178,6 @@ impl AgentAdapter for CopilotAdapter {
         AgentId::Copilot
     }
 
-    fn detect(&self) -> bool {
-        self.db.is_file()
-    }
-
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let Some(rows) = self.rows() else {
             return Ok(Vec::new());
@@ -231,8 +227,7 @@ impl AgentAdapter for CopilotAdapter {
         })
     }
 
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        // SQLite 库变更 watcher 不追踪(只认 .jsonl),依赖手动/启动时刷新
-        Vec::new()
+    fn data_roots(&self) -> Vec<PathBuf> {
+        vec![self.db.clone()]
     }
 }

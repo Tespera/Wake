@@ -71,6 +71,16 @@ pub const ROW_HEIGHT: Pixels = px(32.);
 /// 配 FONT_CAPTION 形成侧栏纵向层级(macOS 原生侧栏惯例)
 pub const ROW_HEIGHT_SUB: Pixels = px(26.);
 
+// ---------------- 圆角 ----------------
+// 四档见 DESIGN.md:面板 12 = `theme.radius_lg`,列表与侧栏选择 8 = `theme.radius`
+// (这两档走主题 token),其余三档无 token,在此定名以免散成魔法数字。
+/// 按钮圆角。**用户钉死 6px,勿改**
+pub const RADIUS_BUTTON: Pixels = px(6.);
+/// 快捷键标签
+pub const RADIUS_KBD: Pixels = px(5.);
+/// 小胶囊 badge(项目名 / model / source / 各处计数共用)
+pub const RADIUS_BADGE: Pixels = px(4.);
+
 // ---------------- 交互态文字 ----------------
 
 /// gpui 陷阱兜底:`.hover()`/`.active()` 闭包的 text 样式对 base 是**整体替换**

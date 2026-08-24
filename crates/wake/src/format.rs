@@ -46,6 +46,29 @@ pub fn fmt_tokens(n: Option<i64>) -> String {
     }
 }
 
+/// 绝对路径 → `~/…` 形式,**不折叠中段**。数据源面板要如实给出完整路径
+/// (display_file_path 那种 `~/a/…/file` 的折叠在那里会把信息吃掉)
+pub fn tilde_path(p: &str) -> String {
+    // HOME 进程内不变,缓存住:display_file_path 经由本函数落在详情页
+    // header 上,那是每帧都跑的路径
+    static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let home = HOME.get_or_init(|| {
+        dirs::home_dir()
+            .map(|h| h.to_string_lossy().to_string())
+            .filter(|h| !h.is_empty())
+    });
+    // 边界必须落在分隔符上:裸 starts_with 会把 HOME 的同名前缀兄弟目录
+    // 也折叠掉(HOME=/Users/al 时 /Users/al-data → "~-data",一个并不存在
+    // 的 HOME 相对路径)。自定义 CODEX_HOME / XDG_DATA_HOME 让这种根变得可能
+    match home {
+        Some(h) => match p.strip_prefix(h.as_str()) {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+            _ => p.to_string(),
+        },
+        None => p.to_string(),
+    }
+}
+
 /// 会话文件路径的展示形态(详情页路径行):SQLite 虚拟路径剥 `#<id>`、
 /// HOME 缩成 `~`、深路径折叠中段(根目录 + … + 文件名)。
 /// 仅用于展示——Reveal in Finder 仍传原始完整路径。
@@ -56,11 +79,7 @@ pub fn display_file_path(path: &str) -> String {
         .filter(|(db, _)| db.ends_with(".db"))
         .map(|(db, _)| db)
         .unwrap_or(path);
-    let tilde = dirs::home_dir()
-        .map(|h| h.to_string_lossy().to_string())
-        .filter(|h| !h.is_empty() && p.starts_with(h.as_str()))
-        .map(|h| format!("~{}", &p[h.len()..]))
-        .unwrap_or_else(|| p.to_string());
+    let tilde = tilde_path(p);
     let parts: Vec<&str> = tilde.split('/').collect();
     match (parts.first(), parts.get(1), parts.last()) {
         // 超过 根/次级/…/文件 四段的深路径折叠中段

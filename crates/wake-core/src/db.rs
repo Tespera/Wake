@@ -385,6 +385,30 @@ impl Store {
         Ok(map)
     }
 
+    /// 各数据源目录下的会话数(Session locations 面板用):一次扫表按
+    /// **(agent, 数据根)** 归属,免去每个目录一次往返。**不过滤 archived**
+    /// ——归档目录本就该显示自己的量,那正是 agent_counts(WHERE archived = 0)
+    /// 看不见的那部分。
+    /// 必须连 agent 一起比,且边界走 path_under:CODEX_HOME / XDG_DATA_HOME
+    /// 允许把一家的数据根搬进另一家的树下,只认裸路径前缀会把整批会话静默
+    /// 记到别家行上
+    pub fn counts_by_path_prefix(&self, sources: &[(String, String)]) -> Result<Vec<i64>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT agent_id, file_path FROM sessions")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut counts = vec![0i64; sources.len()];
+        for row in rows {
+            let (agent, path) = row?;
+            if let Some(i) = sources
+                .iter()
+                .position(|(a, root)| *a == agent && path_under(&path, root))
+            {
+                counts[i] += 1;
+            }
+        }
+        Ok(counts)
+    }
+
     /// 全文搜索:trigram MATCH(每段 ≥3 码点)或 LIKE 降级。返回 (hits, degraded)
     pub fn search(
         &self,
@@ -633,4 +657,15 @@ pub fn default_db_path() -> std::path::PathBuf {
         }
     }
     db
+}
+
+/// 会话文件是否落在这个数据根下。边界必须落在分隔符上,否则 `…/sessions`
+/// 会把兄弟目录 `…/sessions-old` 一并吞掉;SQLite 型的数据根就是库文件本身,
+/// 其会话是 `<db>#<id>` 虚拟路径,故 '#' 同样算边界
+fn path_under(path: &str, root: &str) -> bool {
+    match path.strip_prefix(root) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('/') || rest.starts_with('#'),
+        None => false,
+    }
 }

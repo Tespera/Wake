@@ -111,6 +111,11 @@ fn setup() -> &'static TestEnv {
         .expect("write dsh subagent log");
 
         std::env::set_var("HOME", home.path());
+        // 测试只受这个假 HOME 支配:opencode 认 XDG_DATA_HOME、codex 认
+        // CODEX_HOME,开发者或 CI 机器上设了它们,adapter 就会绕过 fixture
+        // 去读真实库(实测 opencode 的两个契约测试会因此挂掉)
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("CODEX_HOME");
         TestEnv {
             copilot_db,
             opencode_db,
@@ -840,6 +845,85 @@ fn assert_seq_contract(adapter: &dyn AgentAdapter, r: &SessionFileRef) {
     assert_eq!(s.meta.key, t.meta.key, "[{tag}] key 两侧不一致");
     assert_eq!(s.meta.title, t.meta.title, "[{tag}] title 两侧不一致");
     assert_eq!(s.meta.message_count, t.meta.message_count, "[{tag}] message_count 两侧不一致");
+}
+
+#[test]
+fn watch_paths_derive_from_data_roots() {
+    // watch_paths 没有各家实现,统一由 data_roots 的"现存目录"子集派生——
+    // 直接断言派生关系本体,外加 SQLite 型必须无监听目录这条语义守卫
+    // (watcher 只认 .jsonl,库变更靠启动/手动刷新;有人把库文件的父目录
+    // 塞进 data_roots 就会破)
+    let _env = setup();
+    for a in wake_core::adapters::create_adapters() {
+        let tag = a.agent().as_str();
+        let watched = a.watch_paths();
+        let expect: Vec<std::path::PathBuf> =
+            a.data_roots().into_iter().filter(|p| p.is_dir()).collect();
+        assert_eq!(watched, expect, "[{tag}] watch_paths 必须等于 data_roots 的现存目录子集");
+        if matches!(a.agent(), AgentId::Copilot | AgentId::Opencode | AgentId::Antigravity) {
+            assert!(watched.is_empty(), "[{tag}] SQLite 型不该有监听目录");
+        }
+    }
+}
+
+#[test]
+fn overlapping_watch_roots_dispatch_to_deepest() {
+    // env 自定义根可以落在别家数据树内(CODEX_HOME=~/.claude/projects/codex
+    // 这类):事件分派必须取最长匹配根,首个命中会把 codex 的 rollout 交给
+    // claude 的 file_ref(对 .jsonl 宽松)以错误 agent 入库。
+    // 兄弟目录同名前缀(projects vs projects-old)靠 Path 组件语义天然免疫
+    use std::path::{Path, PathBuf};
+    let roots = vec![
+        (PathBuf::from("/h/.claude/projects"), AgentId::ClaudeCode),
+        (PathBuf::from("/h/.claude/projects/codex/sessions"), AgentId::Codex),
+    ];
+    let deep = Path::new("/h/.claude/projects/codex/sessions/2026/08/rollout-x.jsonl");
+    assert_eq!(
+        wake_core::watcher::resolve_watch_agent(&roots, deep),
+        Some(AgentId::Codex),
+        "嵌套根必须归最深那家"
+    );
+    let shallow = Path::new("/h/.claude/projects/p1/sess.jsonl");
+    assert_eq!(
+        wake_core::watcher::resolve_watch_agent(&roots, shallow),
+        Some(AgentId::ClaudeCode)
+    );
+    let sibling = Path::new("/h/.claude/projects-old/p1/sess.jsonl");
+    assert_eq!(
+        wake_core::watcher::resolve_watch_agent(&roots, sibling),
+        None,
+        "同名前缀兄弟目录不该匹配"
+    );
+}
+
+#[test]
+fn data_roots_contract() {
+    // roster 单实例契约:create_adapters 返回全量十三家(不按 detect 过滤,
+    // scanner 对缺根家靠各自 list_session_files 降级为空);每家必须给出
+    // 绝对路径的数据根——"Session locations" 面板、watch_paths 派生、按
+    // (agent, 根) 计数全都建立在它上面
+    let _env = setup();
+    let adapters = wake_core::adapters::create_adapters();
+    assert_eq!(adapters.len(), 13, "全量 roster 必须十三家,含本机没装的");
+    for a in &adapters {
+        let tag = a.agent().as_str();
+        let roots = a.data_roots();
+        assert!(!roots.is_empty(), "[{tag}] data_roots 不能为空");
+        for r in &roots {
+            assert!(r.is_absolute(), "[{tag}] 路径须为绝对路径: {r:?}");
+        }
+    }
+    // 假 HOME 里造过数据的四家必须被 detect(默认实现 = data_roots 任一存在)
+    // 认出;其中三家是 SQLite 型,它们 watch_paths 恒空,这正是 data_roots
+    // 独立存在的理由
+    let detected: Vec<&str> = adapters
+        .iter()
+        .filter(|a| a.detect())
+        .map(|a| a.agent().as_str())
+        .collect();
+    for expect in ["copilot", "opencode", "antigravity", "dsh"] {
+        assert!(detected.contains(&expect), "{expect} 应被检出,实际 {detected:?}");
+    }
 }
 
 #[test]

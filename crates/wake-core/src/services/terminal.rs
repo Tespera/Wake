@@ -594,6 +594,30 @@ pub fn show_fatal_alert(message: &str) {
     )]);
 }
 
+/// 起 Finder 子进程并**收尸**。两头都不能选:`status()` 把 UI 线程阻塞到
+/// LaunchServices 往返结束(Finder 冷启上百毫秒);裸 `spawn()` 丢掉 Child 则
+/// 留僵尸——Unix 上 Child 的 Drop 不 wait,实测点几次就攒几个 `<defunct>`,
+/// 直到 Wake 退出才回收。故 spawn 后交给一个短命线程 wait
+fn spawn_and_reap(mut cmd: Command) {
+    if let Ok(mut child) = cmd.spawn() {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
+}
+
+/// 在 Finder 里打开这个位置:目录直接进入,文件则退回在父目录中选中它
+/// ——SQLite 型的数据源是库文件,直接 open 会把它丢给默认应用打开
+pub fn open_in_finder(path: &str) {
+    if Path::new(path).is_dir() {
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        spawn_and_reap(cmd);
+    } else {
+        reveal_in_finder(path);
+    }
+}
+
 pub fn reveal_in_finder(path: &str) {
     // SQLite 型会话是 <db>#<id> 虚拟路径,磁盘上不存在——reveal 库文件本体
     let p = if Path::new(path).exists() {
@@ -601,5 +625,7 @@ pub fn reveal_in_finder(path: &str) {
     } else {
         path.rsplit_once('#').map(|(db, _)| db).unwrap_or(path)
     };
-    let _ = Command::new("open").args(["-R", p]).status();
+    let mut cmd = Command::new("open");
+    cmd.args(["-R", p]);
+    spawn_and_reap(cmd);
 }

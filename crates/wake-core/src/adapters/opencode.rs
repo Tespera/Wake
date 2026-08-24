@@ -66,15 +66,27 @@ fn has_v2(conn: &rusqlite::Connection) -> bool {
     .is_ok()
 }
 
+/// opencode 走 XDG 规范——二进制里就是 `process.env.XDG_DATA_HOME ||
+/// ~/.local/share`。设过这个变量的机器,库根本不在默认位置(GitHub #2 的现场
+/// 疑似如此)。Dock 启动的 Wake 读不到用户 shell 的 env,故两处都探、以实际
+/// 存在的那个为准
+fn db_path() -> PathBuf {
+    let default = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".local")
+        .join("share")
+        .join("opencode")
+        .join("opencode.db");
+    super::env_dir("XDG_DATA_HOME")
+        .map(|x| x.join("opencode").join("opencode.db"))
+        .filter(|p| p.is_file())
+        .unwrap_or(default)
+}
+
 impl OpencodeAdapter {
     pub fn new() -> Self {
         Self {
-            db: dirs::home_dir()
-                .unwrap_or_default()
-                .join(".local")
-                .join("share")
-                .join("opencode")
-                .join("opencode.db"),
+            db: db_path(),
             rows_cache: MtimeCache::new(),
         }
     }
@@ -400,10 +412,6 @@ impl AgentAdapter for OpencodeAdapter {
         AgentId::Opencode
     }
 
-    fn detect(&self) -> bool {
-        self.db.is_file()
-    }
-
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let Some(rows) = self.rows() else {
             return Ok(Vec::new());
@@ -453,7 +461,7 @@ impl AgentAdapter for OpencodeAdapter {
         })
     }
 
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        Vec::new()
+    fn data_roots(&self) -> Vec<PathBuf> {
+        vec![self.db.clone()]
     }
 }

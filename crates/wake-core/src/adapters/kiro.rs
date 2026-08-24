@@ -161,10 +161,6 @@ impl AgentAdapter for KiroAdapter {
         AgentId::Kiro
     }
 
-    fn detect(&self) -> bool {
-        self.root.is_dir()
-    }
-
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         Ok(list_jsonl_refs(&self.root, AgentId::Kiro, str::to_string))
     }
@@ -192,11 +188,7 @@ impl AgentAdapter for KiroAdapter {
         })
     }
 
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        if self.detect() {
-            vec![self.root.clone()]
-        } else {
-            Vec::new()
-        }
+    fn data_roots(&self) -> Vec<PathBuf> {
+        vec![self.root.clone()]
     }
 }

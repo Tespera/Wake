@@ -82,6 +82,7 @@ icons!(
     "circle-x",
     "file-text",
     "more-horizontal",
+    "hard-drive",
 );
 
 impl AssetSource for Assets {

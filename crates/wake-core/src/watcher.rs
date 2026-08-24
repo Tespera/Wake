@@ -16,6 +16,20 @@ pub struct SessionWatcher {
     _thread: std::thread::JoinHandle<()>,
 }
 
+/// 事件路径 → 归属 agent:取**最长匹配根**,不是第一个命中。env 自定义根
+/// (CODEX_HOME/XDG_DATA_HOME)可以落在别家数据树内,此时事件路径同时匹配
+/// 两个根,按 roster 顺序取首个会把事件分给外层那家——file_ref 又对 .jsonl
+/// 很宽松,会以错误的 agent 入库(错 key + 同 file_path 还会触发 UNIQUE 冲突)。
+/// 更深的根必然是更具体的归属;Path::starts_with 按组件比较,同名前缀兄弟
+/// 目录不会误匹配
+pub fn resolve_watch_agent(roots: &[(PathBuf, AgentId)], path: &Path) -> Option<AgentId> {
+    roots
+        .iter()
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map(|(_, agent)| *agent)
+}
+
 pub fn start_watcher(
     adapters: Arc<Vec<Box<dyn AgentAdapter>>>,
     store: Arc<Store>,
@@ -38,12 +52,7 @@ pub fn start_watcher(
     }
 
     let thread = std::thread::spawn(move || {
-        let resolve_agent = |path: &Path| -> Option<AgentId> {
-            roots
-                .iter()
-                .find(|(root, _)| path.starts_with(root))
-                .map(|(_, agent)| *agent)
-        };
+        let resolve_agent = |path: &Path| resolve_watch_agent(&roots, path);
 
         let mut pending: HashMap<PathBuf, AgentId> = HashMap::new();
         let mut removed: Vec<PathBuf> = Vec::new();

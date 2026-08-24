@@ -126,14 +126,15 @@ UI 语言英文;会话正文保持原语言。元信息分隔符固定为前后�
 
 ### 资料库侧栏
 
-- 顶部是唯一的全文搜索入口,文案 "Search sessions",右侧显示 `⌘K`,右侧并排 refresh 按钮;Search/All Sessions/Starred 固定不随滚动。
-- 搜索行必须有防溢出结构:标签文字 `flex_1 + min_w_0 + truncate`,图标与 `⌘K` 徽标显式 `flex_shrink_0`。裸文字子元素的最小宽度被内容锁死,侧栏一窄就会把 refresh 按钮挤出边界裁掉。
+- 顶部是唯一的全文搜索入口,文案 "Search sessions",右侧显示 `⌘K`;Search/All Sessions/Starred 固定不随滚动。
+- 搜索行必须有防溢出结构:标签文字 `flex_1 + min_w_0 + truncate`,图标与 `⌘K` 徽标显式 `flex_shrink_0`。裸文字子元素的最小宽度被内容锁死,侧栏一窄就会把右侧元素挤出边界裁掉。
 - **行分两级**(侧栏纵向层级的来源,不得拉平):主导航 All Sessions/Starred 32px 行高 + Body 14;分组展开项(agent/项目)26px 行高 + Caption 12 + 整行右移 `SUB_INDENT` 12px 表达从属。
 - **每行必须有行首元素**,由 `RowLead` 枚举强制(`Icon` 或 `Brand` 两态,无 `None`):主导航用 Lucide 单线图标,agent 行用品牌 PNG,项目行用 `folder.svg`。槽位定宽 `LEAD_BOX` 管右侧文字起点统一,槽内居中管中轴对齐。
 - 线条图标比实心品牌图视觉轻,同档里给小一号:分组项 Lucide 14 / 品牌图 18,主导航 Lucide 15。
 - 行内容 = 行首元素 + 标题 + 计数;计数一律 Label 档 muted。
 - 组头 "Agents"/"Projects" 用 Body 档常规字重 + muted 色(与主导航同字号同字重,仅靠颜色和"无行首图标"区分——加粗会让组头压过它统辖的行),带 13px chevron 可折叠。
-- 底部状态栏"常态沉默":仅刷新中或监听不可用时出现,顶部 hairline 分隔;文案须可 truncate,窄侧栏放不下长句(故为 "Live updates off" 而非带操作建议的整句)。
+- 底部工具条常驻,顶部 hairline 分隔,按钮靠右排列(次要操作区:透明底、hover 才出色,不与导航行选中态抢注意力)——左为 "Session locations"(硬盘图标,开面板列出每家 agent 的数据路径、会话数,点击行在 Finder 打开),右为 refresh。
+- 工具条内的**状态行"常态沉默"**:仅刷新中或监听不可用时出现在按钮行上方;文案须可 truncate,窄侧栏放不下长句(故为 "Live updates off" 而非带操作建议的整句)。
 - 不把项目包装成卡片,不堆叠分支、时间或重复图标。项目行不加彩色标识——同一图标重复十几次不传递信息。
 
 ### 会话流
@@ -189,7 +190,7 @@ emoji 不再承担界面或正文结构图标职责。
 - UI chrome 只使用内嵌 Lucide 单线 SVG，不使用 Unicode 或 emoji 图标；Agent 身份用内嵌品牌 PNG，经 `img()` 渲染并**保持原色**(不得用 `text_color` 着色,选中态也不变色)。
 - 品牌 PNG 登记在 `assets.rs` 的 `brands!` 宏,文件名 = `AgentId::as_str()`,路径含 `.png`。入库前须裁掉透明边并保持正方形；带白色/彩色底的 app-icon 风格图必须先抠底,否则在侧栏材质上会露出白方块。
 - 品牌图标侧栏分组项 18px、内容区(列表/搜索/详情)15px；Lucide 行内图标 13–15px；主操作与工具栏图标 14–16px；空态图标 22–26px。
-- 面板圆角 12px，列表与侧栏选择 8px，按钮固定 6px，快捷键标签 5px。
+- 面板圆角 12px，列表与侧栏选择 8px，按钮固定 6px，快捷键标签 5px，badge 胶囊 4px。代码里前两档走 `theme.radius_lg` / `theme.radius`，后三档见 `ui.rs` 的 `RADIUS_BUTTON` / `RADIUS_KBD` / `RADIUS_BADGE`——不要再写裸数字。
 - 常驻界面零投影、零渐变、无装饰性描边。菜单、命令面板、确认框和通知由组件库提供浮层阴影。
 - 相邻的自定义材质只用一套 token 和圆角语言，避免每个按钮各自模拟玻璃。
 

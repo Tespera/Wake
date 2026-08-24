@@ -269,10 +269,6 @@ impl AgentAdapter for CursorAdapter {
         AgentId::Cursor
     }
 
-    fn detect(&self) -> bool {
-        self.root.is_dir()
-    }
-
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
         let mut refs = Vec::new();
         let Ok(projects) = fs::read_dir(&self.root) else {
@@ -372,11 +368,7 @@ impl AgentAdapter for CursorAdapter {
         Ok(parse_cursor_jsonl(&file)?.messages)
     }
 
-    fn watch_paths(&self) -> Vec<PathBuf> {
-        if self.detect() {
-            vec![self.root.clone()]
-        } else {
-            Vec::new()
-        }
+    fn data_roots(&self) -> Vec<PathBuf> {
+        vec![self.root.clone()]
     }
 }
