@@ -268,6 +268,25 @@ impl AgentAdapter for GeminiAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // `~/.gemini` 形态(含 tmp/)则 projects.json 在其顶层;直接选中 tmp
+        // 形态则上一层找。侧档必须相对 dir 派生,落回默认家就会拿错 cwd 映射
+        let (root, projects_json) = if dir.join("tmp").is_dir() {
+            (dir.join("tmp"), dir.join("projects.json"))
+        } else {
+            let pj = dir
+                .parent()
+                .map(|p| p.join("projects.json"))
+                .unwrap_or_else(|| dir.join("projects.json"));
+            (dir, pj)
+        };
+        Box::new(Self {
+            root,
+            projects_json,
+            slug_cache: std::sync::Mutex::new(None),
+        })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

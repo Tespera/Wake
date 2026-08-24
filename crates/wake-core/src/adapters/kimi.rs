@@ -284,6 +284,25 @@ impl AgentAdapter for KimiAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // `~/.kimi-code` 形态(含 sessions/)则 index 在其顶层;直接选中
+        // sessions 则上一层找。index 相对 dir 派生,落回默认家会拿错 cwd 映射
+        let (root, index_path) = if dir.join("sessions").is_dir() {
+            (dir.join("sessions"), dir.join("session_index.jsonl"))
+        } else {
+            let idx = dir
+                .parent()
+                .map(|p| p.join("session_index.jsonl"))
+                .unwrap_or_else(|| dir.join("session_index.jsonl"));
+            (dir, idx)
+        };
+        Box::new(Self {
+            root,
+            index_path,
+            cwd_cache: MtimeCache::new(),
+        })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

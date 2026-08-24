@@ -261,6 +261,18 @@ impl AgentAdapter for PiAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // 选中 `~/.pi`/`~/.omp` 家目录形态或 sessions 目录本身都认。
+        // pi 与 omp 布局全同:实例保持自己的 agent,探测时两家都会命中同一目录,
+        // 取舍交 UI(用户知道自己装的是哪个 CLI)
+        let nested = dir.join("agent").join("sessions");
+        let root = if nested.is_dir() { nested } else { dir };
+        Box::new(Self {
+            agent: self.agent,
+            root,
+        })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

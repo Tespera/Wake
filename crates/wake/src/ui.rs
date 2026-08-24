@@ -81,6 +81,14 @@ pub const RADIUS_KBD: Pixels = px(5.);
 /// 小胶囊 badge(项目名 / model / source / 各处计数共用)
 pub const RADIUS_BADGE: Pixels = px(4.);
 
+// ---------------- 组件度量派生 ----------------
+
+/// gpui-component `Size::Small` 按钮的水平内边距(px_3 @ rem14 = 10.5)。
+/// location 表单的"内容轴"对齐从它派生——组件升级或 rem 基准变更先核此值
+pub const BUTTON_SM_PX: Pixels = px(10.5);
+/// gpui-component `Size::Small` 按钮高度(h_6 = 24),手排胶囊钮取齐用
+pub const BUTTON_SM_H: Pixels = px(24.);
+
 // ---------------- 交互态文字 ----------------
 
 /// gpui 陷阱兜底:`.hover()`/`.active()` 闭包的 text 样式对 base 是**整体替换**

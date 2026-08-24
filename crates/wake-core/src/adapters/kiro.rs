@@ -188,6 +188,18 @@ impl AgentAdapter for KiroAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // `~/.kiro`/`~/.kiro/sessions`/`~/.kiro/sessions/cli` 三层都认
+        let root = if dir.join("sessions").join("cli").is_dir() {
+            dir.join("sessions").join("cli")
+        } else if dir.join("cli").is_dir() {
+            dir.join("cli")
+        } else {
+            dir
+        };
+        Box::new(Self { root })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

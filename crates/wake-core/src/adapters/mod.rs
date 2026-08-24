@@ -83,6 +83,26 @@ pub trait AgentAdapter: Send + Sync {
     fn watch_paths(&self) -> Vec<std::path::PathBuf> {
         self.data_roots().into_iter().filter(|p| p.is_dir()).collect()
     }
+    /// 以自定义数据根构造本家的第二实例("Session locations" 的 Add location)。
+    /// `dir` 是用户在系统目录选择器里选中的目录;各家把它整形成自己默认根的形态
+    /// (允许选"家目录"或数据目录任一层,SQLite 型在其中找库文件),整形判据只看
+    /// `dir` 内的现有结构,与默认实例的 env 探测同一快照语义。
+    /// 唯一消费方是 create_adapters_with(常驻 roster 的自定义实例);
+    /// 侧档(gemini projects.json / kimi session_index / codex state DB)必须
+    /// 全部相对 `dir` 派生,落回默认家目录就会拿错树。新增 adapter 必须实现。
+    fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter>;
+}
+
+/// 入库前的自定义根归一化:把用户选中的目录整形成本家"该存哪一层"的形态。
+/// **按 agent 静态分派、不依赖 roster**——该家默认实例被用户移除且无自定义
+/// 实例时,归一化仍必须生效(2026-08-24 Codex review);各家实现放各家文件,
+/// 这里只做路由。归一化在构造之外做,是为维持"with_custom_root 派生根都在
+/// 落库目录之下"的契约(构造器越界摸父目录会破坏契约测试与面板行标记)
+pub fn normalize_custom_root(agent: AgentId, dir: std::path::PathBuf) -> std::path::PathBuf {
+    match agent {
+        AgentId::Codex => codex::normalize_custom_root(dir),
+        _ => dir,
+    }
 }
 
 /// 环境变量指定的数据根。**只能读进程环境**:从 Dock 启动的 GUI 不继承用户
@@ -121,6 +141,98 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(antigravity::AntigravityAdapter::new()),
         Box::new(dsh::DshAdapter::new()),
     ]
+}
+
+
+/// 用户 location 配置下的完整 roster:默认实例在前(被用户移除的家除外),
+/// 自定义实例按存储顺序追加在后。顺序是契约的一部分——"按 agent 找第一个"
+/// 的兜底路径(watcher file_ref、adapter_ix_for 的 fallback)落在该家现存的
+/// 首个实例上。自定义实例始终从默认模板构造(即便该家默认被移除,模板仍是
+/// with_custom_root 的 ctor 来源)。构造点与 create_adapters 同属唯一化范围:
+/// 换代必须整体换(见不变量 8)
+pub fn create_adapters_with(
+    custom_roots: &[(AgentId, std::path::PathBuf)],
+    removed_defaults: &[AgentId],
+) -> Vec<Box<dyn AgentAdapter>> {
+    let base = create_adapters();
+    let customs: Vec<Box<dyn AgentAdapter>> = custom_roots
+        .iter()
+        .filter_map(|(agent, root)| {
+            base.iter()
+                .find(|a| a.agent() == *agent)
+                .map(|a| a.with_custom_root(root.clone()))
+        })
+        .collect();
+    let mut v: Vec<Box<dyn AgentAdapter>> = base
+        .into_iter()
+        .filter(|a| !removed_defaults.contains(&a.agent()))
+        .collect();
+    v.extend(customs);
+    v
+}
+
+/// 按索引库里的 location 配置构造 roster——**所有打开真实索引库的入口**
+/// (GUI 与 scan CLI)都必须走这里:用默认 roster 对配置过的库跑 run_scan,
+/// 删除检测会把自定义根的会话当"磁盘已删"整批清掉,再把被压制的默认根加回
+/// (2026-08-24 Codex review 抓到 scan bin 正是这么毁数据的)
+pub fn create_adapters_for(store: &crate::db::Store) -> Vec<Box<dyn AgentAdapter>> {
+    let (customs, removed) = store.location_overrides();
+    create_adapters_with(&customs, &removed)
+}
+
+/// 数据根是否拥有该会话文件路径。边界必须落在 '/'(目录型)或 '#'(SQLite
+/// 虚拟路径 `<db>#<id>`)上,与 db 侧 counts_by_path_prefix 同判据——裸前缀
+/// 会把 `…/sessions-old` 记到 `…/sessions` 头上
+pub fn path_owns(root: &str, path: &str) -> bool {
+    // 文件系统根:strip_prefix("/") 剥掉的正是分隔符本身,通用分支会把一切
+    // 后代判为界外(2026-08-24 Codex review)
+    if root == "/" {
+        return path.starts_with('/');
+    }
+    match path.strip_prefix(root) {
+        Some("") => true,
+        Some(rest) => rest.starts_with('/') || rest.starts_with('#'),
+        None => false,
+    }
+}
+
+/// 会话文件应由哪个实例服务:同 agent 中数据根最长前缀匹配者,匹配不到根时
+/// 回退该 agent 的首个(默认)实例。自定义 location 让同 agent 出现多实例后,
+/// "按 agent 找第一个"不再充分——gemini/kimi 的 cwd 反查、codex 的 state DB
+/// 都是实例相对的侧档,拿默认实例解析自定义根下的文件会读错树
+pub fn adapter_ix_for(
+    adapters: &[Box<dyn AgentAdapter>],
+    agent: AgentId,
+    file_path: &str,
+) -> Option<usize> {
+    let first = adapters.iter().position(|a| a.agent() == agent)?;
+    // 常态(该家只有默认一实例,零自定义 location)零分配直返;
+    // data_roots() 每次调用都克隆整组 PathBuf,只该在真多实例时才付
+    if !adapters[first + 1..].iter().any(|a| a.agent() == agent) {
+        return Some(first);
+    }
+    let mut best: Option<(usize, usize)> = None; // (root 长度, 下标)
+    for (ix, a) in adapters.iter().enumerate().skip(first) {
+        if a.agent() != agent {
+            continue;
+        }
+        for r in a.data_roots() {
+            let rs = r.to_string_lossy();
+            if path_owns(&rs, file_path) && best.is_none_or(|(len, _)| rs.len() > len) {
+                best = Some((rs.len(), ix));
+            }
+        }
+    }
+    Some(best.map(|(_, ix)| ix).unwrap_or(first))
+}
+
+/// adapter_ix_for 的引用形态,详情/导出/删除等单会话路径用
+pub fn adapter_for<'a>(
+    adapters: &'a [Box<dyn AgentAdapter>],
+    agent: AgentId,
+    file_path: &str,
+) -> Option<&'a dyn AgentAdapter> {
+    adapter_ix_for(adapters, agent, file_path).map(|ix| adapters[ix].as_ref())
 }
 
 /// 从解析后的消息派生 FTS 单元(text + tool 名称/输入摘要)

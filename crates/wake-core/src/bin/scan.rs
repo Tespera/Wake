@@ -2,7 +2,7 @@
 //! 与 Electron 版基准(claude 97 / codex 168 / messages 31871±)对照。
 use anyhow::Result;
 use std::sync::Arc;
-use wake_core::adapters::create_adapters;
+use wake_core::adapters::create_adapters_for;
 use wake_core::db::Store;
 use wake_core::models::SessionFilter;
 use wake_core::scanner::{run_scan, NullEvents, ScanEvents, ScanProgress};
@@ -28,7 +28,8 @@ fn main() -> Result<()> {
     eprintln!("DB: {}", db_path.display());
 
     let store = Arc::new(Store::open(&db_path)?);
-    let adapters = create_adapters();
+    // 必须带上库里的 location 配置:默认 roster 会把自定义根会话当已删清掉
+    let adapters = create_adapters_for(&store);
     eprintln!(
         "adapters: {:?}",
         adapters.iter().map(|a| a.agent().as_str()).collect::<Vec<_>>()

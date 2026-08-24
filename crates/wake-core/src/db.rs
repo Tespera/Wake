@@ -57,7 +57,20 @@ CREATE TABLE IF NOT EXISTS user_data (
 
 CREATE TABLE IF NOT EXISTS tombstones (
   file_path  TEXT PRIMARY KEY,
+  key        TEXT,
   deleted_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS custom_roots (
+  agent    TEXT NOT NULL,
+  path     TEXT NOT NULL,
+  added_at INTEGER,
+  PRIMARY KEY (agent, path)
+);
+
+CREATE TABLE IF NOT EXISTS removed_defaults (
+  agent      TEXT PRIMARY KEY,
+  removed_at INTEGER
 );
 "#;
 
@@ -71,12 +84,16 @@ fn open_conn(path: &Path) -> Result<Connection> {
     conn.busy_timeout(std::time::Duration::from_millis(3000))?;
     conn.execute_batch(DDL)
         .context("failed to initialize SQLite schema")?;
+    // tombstones.key 迁移(2026-08-24 加列,老库无此列;重复加列报错即忽略):
+    // 墓碑按逻辑会话(key)+物理路径双轨屏蔽,多 location 副本不得复活已删会话
+    let _ = conn.execute("ALTER TABLE tombstones ADD COLUMN key TEXT", []);
     Ok(conn)
 }
 
 /// 打开索引库;打不开就把它连同 WAL/SHM 一起挪到 `.corrupt` 旁路再建一个空的。
-/// 索引本来就能从磁盘全量重扫恢复,重建的真实损失只有 user_data(收藏/置顶)——
-/// 而它远好过 GUI 无提示秒退。返回的 `Some(_)` 是给用户看的说明文案。
+/// 索引本来就能从磁盘全量重扫恢复,重建的真实损失只有 user_data(收藏/置顶)
+/// 与 custom_roots(自定义 location)——而它远好过 GUI 无提示秒退。
+/// 返回的 `Some(_)` 是给用户看的说明文案。
 pub fn open_or_rebuild(path: &Path) -> Result<(Store, Option<String>)> {
     let first = match Store::open(path) {
         Ok(store) => return Ok((store, None)),
@@ -94,8 +111,8 @@ pub fn open_or_rebuild(path: &Path) -> Result<(Store, Option<String>)> {
     Ok((
         store,
         Some(format!(
-            "Index was damaged and has been rebuilt — stars and pins are gone. \
-             The old file is kept at {}",
+            "Index was damaged and has been rebuilt — stars, pins and custom \
+             locations are gone. The old file is kept at {}",
             backup.display()
         )),
     ))
@@ -120,41 +137,40 @@ impl Store {
     pub fn write_session(&self, meta: &SessionMeta, file_mtime: i64, units: &[IndexUnit]) -> Result<()> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
-        {
-            // FTS external content 需要显式 delete 旧行
-            let mut sel = tx.prepare_cached("SELECT id, text FROM messages WHERE session_key = ?1")?;
-            let rows: Vec<(i64, String)> = sel
-                .query_map(params![meta.key], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            let mut fts_del =
-                tx.prepare_cached("INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', ?1, ?2)")?;
-            for (id, text) in rows {
-                fts_del.execute(params![id, text])?;
-            }
-            tx.execute("DELETE FROM messages WHERE session_key = ?1", params![meta.key])?;
-
-            upsert_session(&tx, meta, file_mtime)?;
-
-            let mut ins_msg = tx.prepare_cached(
-                "INSERT INTO messages(session_key, sidechain_id, seq, role, ts, text) VALUES (?1,?2,?3,?4,?5,?6)",
-            )?;
-            let mut ins_fts =
-                tx.prepare_cached("INSERT INTO messages_fts(rowid, text) VALUES (?1, ?2)")?;
-            for u in units {
-                ins_msg.execute(params![
-                    meta.key,
-                    u.sidechain_id,
-                    u.seq,
-                    u.role.as_str(),
-                    u.timestamp,
-                    u.text
-                ])?;
-                let rowid = tx.last_insert_rowid();
-                ins_fts.execute(params![rowid, u.text])?;
-            }
-        }
+        write_session_tx(&tx, meta, file_mtime, units)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// 增量写入的并发安全版:胜者比较与写入**同一事务**——先查后写分开时,
+    /// 败方副本的事件能与全量扫描交错、后发落库,让 file_path 违背 mtime 裁决
+    /// (2026-08-24 Codex review)。返回 false = 本次是败方副本,一字未写
+    pub fn write_session_guarded(
+        &self,
+        meta: &SessionMeta,
+        file_mtime: i64,
+        units: &[IndexUnit],
+    ) -> Result<bool> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        let cur: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT file_path, file_mtime FROM sessions WHERE key = ?1",
+                params![meta.key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((cur_path, cur_mtime)) = cur {
+            let loses = cur_path != meta.file_path
+                && (cur_mtime > file_mtime
+                    || (cur_mtime == file_mtime && cur_path.as_str() < meta.file_path.as_str()));
+            if loses {
+                return Ok(false); // 事务未提交即弃
+            }
+        }
+        write_session_tx(&tx, meta, file_mtime, units)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn write_meta_only(&self, metas: &[(SessionMeta, i64)]) -> Result<()> {
@@ -188,8 +204,8 @@ impl Store {
             if tombstone {
                 if let Some(fp) = file_path {
                     tx.execute(
-                        "INSERT OR REPLACE INTO tombstones(file_path, deleted_at) VALUES (?1, ?2)",
-                        params![fp, now_ms()],
+                        "INSERT OR REPLACE INTO tombstones(file_path, key, deleted_at) VALUES (?1, ?2, ?3)",
+                        params![fp, key, now_ms()],
                     )?;
                 }
             }
@@ -198,7 +214,21 @@ impl Store {
         Ok(())
     }
 
-    pub fn remove_by_path(&self, file_path: &str) -> Result<()> {
+    /// 路径 → 现行 key(watcher 增量的易主清理用)
+    pub fn key_for_path(&self, file_path: &str) -> Result<Option<String>> {
+        let conn = self.read.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT key FROM sessions WHERE file_path = ?1",
+                params![file_path],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// 按路径删行,返回被删会话的 key——watcher 用它触发幸存副本上位
+    ///(同 key 的另一 location 副本接管,Codex review P2)
+    pub fn remove_by_path(&self, file_path: &str) -> Result<Option<String>> {
         let key: Option<String> = {
             let conn = self.read.lock().unwrap();
             conn.query_row(
@@ -208,10 +238,10 @@ impl Store {
             )
             .optional()?
         };
-        if let Some(k) = key {
-            self.remove_session(&k, false)?;
+        if let Some(k) = &key {
+            self.remove_session(k, false)?;
         }
-        Ok(())
+        Ok(key)
     }
 
     pub fn set_user_data(&self, key: &str, favorite: Option<bool>, pinned: Option<bool>) -> Result<()> {
@@ -224,6 +254,113 @@ impl Store {
                pinned   = COALESCE(?3, user_data.pinned),
                updated_at = excluded.updated_at",
             params![key, favorite.map(|v| v as i64), pinned.map(|v| v as i64), now_ms()],
+        )?;
+        Ok(())
+    }
+
+    // ---------- 自定义 location(Session locations 面板的 Add location) ----------
+
+    /// 与收藏/置顶同层级的用户数据:索引重扫不动它,只有索引文件本体损坏
+    /// 重建才丢(open_or_rebuild 的提示文案已列入)
+    pub fn list_custom_roots(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt =
+            conn.prepare_cached("SELECT agent, path FROM custom_roots ORDER BY added_at, path")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn add_custom_root(&self, agent: &str, path: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO custom_roots(agent, path, added_at) VALUES (?1, ?2, ?3)",
+            params![agent, path, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// location 配置一次取齐(自定义根 + 被移除预设),解析成模型层类型;
+    /// 未识别的 agent 名(库被降级版本写过)静默跳过。GUI 与 scan CLI 共用
+    pub fn location_overrides(&self) -> (Vec<(AgentId, std::path::PathBuf)>, Vec<AgentId>) {
+        let customs = self
+            .list_custom_roots()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(a, p)| AgentId::from_str(&a).map(|a| (a, std::path::PathBuf::from(p))))
+            .collect();
+        let removed = self
+            .list_removed_defaults()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|a| AgentId::from_str(&a))
+            .collect();
+        (customs, removed)
+    }
+
+    /// 编辑 location 的全形态原子写入(2026-08-24 Codex review:分开自动提交
+    /// 时第二步失败会把配置改成半生效)。旧单元:自定义 = 删记录,预设 =
+    /// 压默认;新单元一律记自定义——含换 agent 的编辑,全在一个事务里
+    pub fn replace_location(
+        &self,
+        old_agent: &str,
+        old_custom_path: Option<&str>,
+        new_agent: &str,
+        new_path: &str,
+    ) -> Result<()> {
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        match old_custom_path {
+            Some(p) => {
+                tx.execute(
+                    "DELETE FROM custom_roots WHERE agent = ?1 AND path = ?2",
+                    params![old_agent, p],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO removed_defaults(agent, removed_at) VALUES (?1, ?2)",
+                    params![old_agent, now_ms()],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO custom_roots(agent, path, added_at) VALUES (?1, ?2, ?3)",
+            params![new_agent, new_path, now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 恢复初始:清空全部 location 偏离(自定义 + 被移除的预设)
+    pub fn clear_location_overrides(&self) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute_batch("DELETE FROM custom_roots; DELETE FROM removed_defaults;")?;
+        Ok(())
+    }
+
+    /// 预设 location 的移除是"压制该家默认实例"而非删路径——默认根随
+    /// env(CODEX_HOME 等)在构造时活解析,不能物化落库,故只记偏离
+    pub fn list_removed_defaults(&self) -> Result<Vec<String>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached("SELECT agent FROM removed_defaults ORDER BY agent")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn add_removed_default(&self, agent: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO removed_defaults(agent, removed_at) VALUES (?1, ?2)",
+            params![agent, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_custom_root(&self, agent: &str, path: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "DELETE FROM custom_roots WHERE agent = ?1 AND path = ?2",
+            params![agent, path],
         )?;
         Ok(())
     }
@@ -250,6 +387,20 @@ impl Store {
             map.insert(path, v);
         }
         Ok(map)
+    }
+
+    /// 逻辑会话级墓碑:同 key 的任何副本(别的 location 里的拷贝)都不得
+    /// 让已删会话复活(2026-08-24 Codex review P1,不变量 3 的多副本延伸)
+    pub fn is_key_tombstoned(&self, key: &str) -> bool {
+        let conn = self.read.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM tombstones WHERE key = ?1",
+            params![key],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|o| o.is_some())
+        .unwrap_or(false)
     }
 
     pub fn is_tombstoned(&self, file_path: &str) -> bool {
@@ -389,7 +540,7 @@ impl Store {
     /// **(agent, 数据根)** 归属,免去每个目录一次往返。**不过滤 archived**
     /// ——归档目录本就该显示自己的量,那正是 agent_counts(WHERE archived = 0)
     /// 看不见的那部分。
-    /// 必须连 agent 一起比,且边界走 path_under:CODEX_HOME / XDG_DATA_HOME
+    /// 必须连 agent 一起比,且边界走 adapters::path_owns:CODEX_HOME / XDG_DATA_HOME
     /// 允许把一家的数据根搬进另一家的树下,只认裸路径前缀会把整批会话静默
     /// 记到别家行上
     pub fn counts_by_path_prefix(&self, sources: &[(String, String)]) -> Result<Vec<i64>> {
@@ -401,7 +552,7 @@ impl Store {
             let (agent, path) = row?;
             if let Some(i) = sources
                 .iter()
-                .position(|(a, root)| *a == agent && path_under(&path, root))
+                .position(|(a, root)| *a == agent && crate::adapters::path_owns(root, &path))
             {
                 counts[i] += 1;
             }
@@ -566,6 +717,49 @@ fn row_to_meta(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     })
 }
 
+/// write_session / write_session_guarded 共用的事务内核
+fn write_session_tx(
+    tx: &rusqlite::Transaction<'_>,
+    meta: &SessionMeta,
+    file_mtime: i64,
+    units: &[IndexUnit],
+) -> Result<()> {
+    // FTS external content 需要显式 delete 旧行
+    let mut sel = tx.prepare_cached("SELECT id, text FROM messages WHERE session_key = ?1")?;
+    let rows: Vec<(i64, String)> = sel
+        .query_map(params![meta.key], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(sel);
+    let mut fts_del = tx.prepare_cached(
+        "INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', ?1, ?2)",
+    )?;
+    for (id, text) in rows {
+        fts_del.execute(params![id, text])?;
+    }
+    drop(fts_del);
+    tx.execute("DELETE FROM messages WHERE session_key = ?1", params![meta.key])?;
+
+    upsert_session(tx, meta, file_mtime)?;
+
+    let mut ins_msg = tx.prepare_cached(
+        "INSERT INTO messages(session_key, sidechain_id, seq, role, ts, text) VALUES (?1,?2,?3,?4,?5,?6)",
+    )?;
+    let mut ins_fts = tx.prepare_cached("INSERT INTO messages_fts(rowid, text) VALUES (?1, ?2)")?;
+    for u in units {
+        ins_msg.execute(params![
+            meta.key,
+            u.sidechain_id,
+            u.seq,
+            u.role.as_str(),
+            u.timestamp,
+            u.text
+        ])?;
+        let rowid = tx.last_insert_rowid();
+        ins_fts.execute(params![rowid, u.text])?;
+    }
+    Ok(())
+}
+
 fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i64) -> Result<()> {
     tx.execute(
         "INSERT INTO sessions(key, agent_id, native_id, title, project_path, project_name,
@@ -659,13 +853,4 @@ pub fn default_db_path() -> std::path::PathBuf {
     db
 }
 
-/// 会话文件是否落在这个数据根下。边界必须落在分隔符上,否则 `…/sessions`
-/// 会把兄弟目录 `…/sessions-old` 一并吞掉;SQLite 型的数据根就是库文件本身,
-/// 其会话是 `<db>#<id>` 虚拟路径,故 '#' 同样算边界
-fn path_under(path: &str, root: &str) -> bool {
-    match path.strip_prefix(root) {
-        Some("") => true,
-        Some(rest) => rest.starts_with('/') || rest.starts_with('#'),
-        None => false,
-    }
-}
+

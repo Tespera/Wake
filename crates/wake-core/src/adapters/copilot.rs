@@ -227,6 +227,15 @@ impl AgentAdapter for CopilotAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // 手输/预填的就是库文件路径时直接认,不再往下拼(Codex review)
+        let db = if dir.is_file() { dir } else { dir.join("session-store.db") };
+        Box::new(Self {
+            db,
+            rows_cache: Mutex::new(None),
+        })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.db.clone()]
     }

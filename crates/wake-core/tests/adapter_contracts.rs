@@ -1128,3 +1128,247 @@ fn merge_quick_meta_default_vs_codex_override() {
     let merged = codex.merge_quick_meta(parsed, &quick);
     assert_eq!(merged.title, "首条消息推导标题");
 }
+
+// ---------------------------------------------------------------- 自定义 location
+
+/// with_custom_root 契约(不变量 8 配套):agent 不变、数据根全部落在自定义
+/// 目录之下(侧档也必须相对它派生,但侧档不在 data_roots,无法在此直接断言)、
+/// 缺根照旧降级为 Ok(空)
+#[test]
+fn with_custom_root_contract() {
+    setup();
+    let dir = tempfile::tempdir().unwrap();
+    let custom = dir.path().join("somewhere-else");
+    for base in wake_core::adapters::create_adapters() {
+        let inst = base.with_custom_root(custom.clone());
+        assert_eq!(inst.agent(), base.agent(), "{:?}: 自定义实例换了 agent", base.agent());
+        let roots = inst.data_roots();
+        assert!(!roots.is_empty(), "{:?}: 自定义实例无数据根", base.agent());
+        for r in &roots {
+            assert!(
+                r.starts_with(&custom),
+                "{:?}: 数据根 {} 溢出自定义目录 {}",
+                base.agent(),
+                r.display(),
+                custom.display()
+            );
+        }
+        let refs = inst
+            .list_session_files()
+            .unwrap_or_else(|e| panic!("{:?}: 缺根必须 Ok(空) 降级,却 Err: {e}", base.agent()));
+        assert!(refs.is_empty(), "{:?}: 空目录读出了会话", base.agent());
+    }
+
+    // codex 的"直接选中 rollout 日期树"分支:顶层有 YYYY 目录时,dir 本身
+    // 即 sessions 根(用户常会选中 sessions 目录本体)
+    let tree = dir.path().join("codex-sessions-copy");
+    fs::create_dir_all(tree.join("2026")).unwrap();
+    let inst = CodexAdapter::new().with_custom_root(tree.clone());
+    assert!(
+        inst.data_roots().contains(&tree),
+        "codex 未把 rollout 树本体当 sessions 根: {:?}",
+        inst.data_roots()
+    );
+}
+
+/// AgentId::ALL 是侧栏/面板/表单下拉共用的顺序事实源:必须与枚举声明序
+/// (= Ord,用户 2026-08-20 钉的展示序)严格一致,且与 roster 的 agent 集合
+/// 等同——第十四家漏进任何一份名单,在这里爆而不是静默从下拉里消失
+#[test]
+fn agent_id_all_matches_ord_and_roster() {
+    setup();
+    assert!(
+        AgentId::ALL.windows(2).all(|w| w[0] < w[1]),
+        "ALL 未按声明序(Ord)排列"
+    );
+    let mut roster: Vec<AgentId> = wake_core::adapters::create_adapters()
+        .iter()
+        .map(|a| a.agent())
+        .collect();
+    roster.sort();
+    let mut all = AgentId::ALL.to_vec();
+    all.sort();
+    assert_eq!(all, roster, "ALL 与 roster 的 agent 集合不一致");
+}
+
+/// 预设 location 的移除 = 压制该家默认实例;该家的自定义实例仍从默认模板
+/// 构造、照常在场(编辑预设 = 压默认 + 记自定义,正是这个组合)
+#[test]
+fn removed_defaults_suppress_instances() {
+    setup();
+    let roster = wake_core::adapters::create_adapters_with(&[], &[AgentId::ClaudeCode]);
+    assert_eq!(roster.len(), 12);
+    assert!(roster.iter().all(|a| a.agent() != AgentId::ClaudeCode));
+
+    let dir = tempfile::tempdir().unwrap();
+    let roster = wake_core::adapters::create_adapters_with(
+        &[(AgentId::ClaudeCode, dir.path().to_path_buf())],
+        &[AgentId::ClaudeCode],
+    );
+    let claude: Vec<_> = roster.iter().filter(|a| a.agent() == AgentId::ClaudeCode).collect();
+    assert_eq!(claude.len(), 1, "默认被压制后应只剩自定义实例");
+    assert!(claude[0].data_roots().iter().all(|r| r.starts_with(dir.path())));
+}
+
+/// normalize_custom_root(静态分派,不依赖 roster——该家默认被移除时也要
+/// 生效):codex 直选 sessions 树或**平铺 archived** 且父目录呈 home 形态时
+/// 上提一层(侧档/归档找回,2026-08-24 Codex review);裸拷贝与其他家恒等
+#[test]
+fn codex_normalize_lifts_sessions_dir_to_home() {
+    use wake_core::adapters::normalize_custom_root;
+    setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("codex-home");
+    fs::create_dir_all(home.join("sessions").join("2026")).unwrap();
+    fs::create_dir_all(home.join("archived_sessions")).unwrap();
+    fs::write(home.join("archived_sessions").join("rollout-x.jsonl"), b"{}").unwrap();
+    fs::write(home.join("state_5.sqlite"), b"x").unwrap();
+    assert_eq!(normalize_custom_root(AgentId::Codex, home.join("sessions")), home);
+    assert_eq!(
+        normalize_custom_root(AgentId::Codex, home.join("archived_sessions")),
+        home,
+        "平铺 archived 目录也应上提到 home"
+    );
+
+    let bare = tmp.path().join("codex-copy");
+    fs::create_dir_all(bare.join("2026")).unwrap();
+    assert_eq!(
+        normalize_custom_root(AgentId::Codex, bare.clone()),
+        bare,
+        "裸树不上提"
+    );
+
+    // 空的真实 sessions 目录(表单允许空路径):凭目录名 + 父级独立证据上提
+    let home2 = tmp.path().join("codex-home-2");
+    fs::create_dir_all(home2.join("sessions")).unwrap();
+    fs::write(home2.join("state_5.sqlite"), b"x").unwrap();
+    assert_eq!(
+        normalize_custom_root(AgentId::Codex, home2.join("sessions")),
+        home2,
+        "空 sessions 目录也应上提"
+    );
+    // 孤立的空 sessions 目录(父级无任何 home 证据)保持原样
+    let lone = tmp.path().join("lone");
+    fs::create_dir_all(lone.join("sessions")).unwrap();
+    assert_eq!(
+        normalize_custom_root(AgentId::Codex, lone.join("sessions")),
+        lone.join("sessions")
+    );
+
+    let d = tmp.path().join("whatever");
+    assert_eq!(
+        normalize_custom_root(AgentId::ClaudeCode, d.clone()),
+        d,
+        "无覆写的家恒等"
+    );
+}
+
+/// create_adapters_for:roster 必须吃索引库里的 location 配置——scan CLI 曾用
+/// 默认 roster 对配置过的库跑扫描,把自定义根会话当"已删"整批清掉
+/// (2026-08-24 Codex review)
+#[test]
+fn create_adapters_for_honors_store_config() {
+    setup();
+    let dir = tempfile::tempdir().unwrap();
+    let store = wake_core::db::Store::open(&dir.path().join("t.db")).unwrap();
+    store.add_custom_root("claude-code", "/tmp/claude-backup").unwrap();
+    store.add_removed_default("codex").unwrap();
+    let roster = wake_core::adapters::create_adapters_for(&store);
+    assert!(
+        roster.iter().all(|a| a.agent() != AgentId::Codex),
+        "被移除的预设仍在 roster"
+    );
+    assert_eq!(
+        roster.iter().filter(|a| a.agent() == AgentId::ClaudeCode).count(),
+        2,
+        "自定义 location 未生效"
+    );
+}
+
+/// path_owns 的边界字典:分隔符边界(sessions-old 不属 sessions)、SQLite
+/// 虚拟路径的 '#'、文件系统根 "/"(strip_prefix 剥掉的正是分隔符,通用分支
+/// 会全判界外——2026-08-24 Codex review)
+#[test]
+fn path_owns_boundaries() {
+    use wake_core::adapters::path_owns;
+    assert!(path_owns("/a/sessions", "/a/sessions"));
+    assert!(path_owns("/a/sessions", "/a/sessions/x.jsonl"));
+    assert!(!path_owns("/a/sessions", "/a/sessions-old/x.jsonl"));
+    assert!(path_owns("/a/store.db", "/a/store.db#42"));
+    assert!(path_owns("/", "/anything/below"));
+    assert!(!path_owns("/b", "/a/x"));
+}
+
+/// 裸 Codex 数据目录按目录名保角色(2026-08-24 Codex review):独立 archived
+/// 拷贝的会话保住 archived 标记;空的独立 sessions 目录以自身为数据根,
+/// 日后落盘的 rollout 能被发现
+#[test]
+fn codex_bare_data_dir_keeps_role() {
+    setup();
+    let tmp = tempfile::tempdir().unwrap();
+    let arch = tmp.path().join("archived_sessions");
+    fs::create_dir_all(&arch).unwrap();
+    fs::copy(
+        fixture("codex/sessions/2026/08/02/rollout-2026-08-02T09-15-00-22222222-aaaa-bbbb-cccc-000000000002.jsonl"),
+        arch.join("rollout-2026-08-02T09-15-00-22222222-aaaa-bbbb-cccc-000000000002.jsonl"),
+    )
+    .unwrap();
+    let inst = CodexAdapter::new().with_custom_root(arch.clone());
+    let refs = inst.list_session_files().unwrap();
+    assert_eq!(refs.len(), 1, "独立 archived 目录应以自身为数据根");
+    let parsed = inst.parse_session(&refs[0]).unwrap();
+    assert!(parsed.meta.archived, "archived 角色丢失,归档会话被标成活跃");
+
+    let empty_sessions = tmp.path().join("sessions");
+    fs::create_dir_all(&empty_sessions).unwrap();
+    let inst = CodexAdapter::new().with_custom_root(empty_sessions.clone());
+    assert!(
+        inst.data_roots().contains(&empty_sessions),
+        "空的独立 sessions 目录应以自身为数据根"
+    );
+}
+
+/// SQLite 型构造器直接给到库文件路径也认(预设行编辑值即库文件,当目录拼
+/// 会得到 <db>/<db> 死路径——2026-08-24 Codex review)
+#[test]
+fn sqlite_custom_root_accepts_db_file() {
+    let env = setup();
+    let inst = CopilotAdapter::new().with_custom_root(env.copilot_db.clone());
+    assert_eq!(inst.data_roots(), vec![env.copilot_db.clone()]);
+    let inst = OpencodeAdapter::new().with_custom_root(env.opencode_db.clone());
+    assert_eq!(inst.data_roots(), vec![env.opencode_db.clone()]);
+    let inst = AntigravityAdapter::new().with_custom_root(env.antigravity_db.clone());
+    assert_eq!(inst.data_roots(), vec![env.antigravity_db.clone()]);
+}
+
+/// 实例路由(不变量 8 配套):同 agent 多实例时,文件按"拥有其根的实例"
+/// 分派(最长前缀 + 分隔符边界),匹配不到根回退默认实例
+#[test]
+fn adapter_ix_for_routes_to_owning_instance() {
+    setup();
+    let dir = tempfile::tempdir().unwrap();
+    let custom = dir.path().to_path_buf();
+    let roster =
+        wake_core::adapters::create_adapters_with(&[(AgentId::ClaudeCode, custom.clone())], &[]);
+    assert_eq!(roster.len(), 14, "13 默认 + 1 自定义");
+    assert_eq!(roster[13].agent(), AgentId::ClaudeCode);
+
+    let under = format!("{}/projects/p/x.jsonl", custom.display());
+    assert_eq!(
+        wake_core::adapters::adapter_ix_for(&roster, AgentId::ClaudeCode, &under),
+        Some(13),
+        "自定义根下的文件应路由到自定义实例"
+    );
+    // 兄弟目录(裸前缀)不得吸入
+    let sibling = format!("{}-old/x.jsonl", custom.display());
+    assert_eq!(
+        wake_core::adapters::adapter_ix_for(&roster, AgentId::ClaudeCode, &sibling),
+        Some(0),
+        "边界外路径应回退默认实例"
+    );
+    assert_eq!(
+        wake_core::adapters::adapter_ix_for(&roster, AgentId::Codex, "/nowhere/x.jsonl"),
+        Some(1),
+        "无根命中回退该 agent 首个实例"
+    );
+}

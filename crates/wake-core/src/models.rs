@@ -21,6 +21,25 @@ pub enum AgentId {
 }
 
 impl AgentId {
+    /// 全部十三家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
+    /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
+    /// 排序当场对不上——契约测试现在卡它与 Ord 一致
+    pub const ALL: [AgentId; 13] = [
+        AgentId::ClaudeCode,
+        AgentId::Codex,
+        AgentId::Grok,
+        AgentId::Dsh,
+        AgentId::Cursor,
+        AgentId::Opencode,
+        AgentId::Pi,
+        AgentId::Omp,
+        AgentId::Kiro,
+        AgentId::Kimi,
+        AgentId::Gemini,
+        AgentId::Copilot,
+        AgentId::Antigravity,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentId::ClaudeCode => "claude-code",

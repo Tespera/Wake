@@ -164,3 +164,74 @@ fn path_counts_respect_agent_and_boundary() {
     assert_eq!(counts[0], 1, "codex 的会话不该被记到 claude 行");
     assert_eq!(counts[1], 1, "sessions-old 不该算进 sessions");
 }
+
+/// 自定义 location 的持久化:与收藏/置顶同层级的用户数据,重复添加幂等
+#[test]
+fn custom_roots_roundtrip() {
+    let (_dir, store) = temp_store();
+    store.add_custom_root("codex", "/tmp/a").unwrap();
+    store.add_custom_root("codex", "/tmp/a").unwrap(); // 幂等
+    store.add_custom_root("claude-code", "/tmp/b").unwrap();
+
+    let mut roots = store.list_custom_roots().unwrap();
+    roots.sort();
+    assert_eq!(
+        roots,
+        vec![
+            ("claude-code".to_string(), "/tmp/b".to_string()),
+            ("codex".to_string(), "/tmp/a".to_string()),
+        ]
+    );
+
+    store.remove_custom_root("codex", "/tmp/a").unwrap();
+    assert_eq!(
+        store.list_custom_roots().unwrap(),
+        vec![("claude-code".to_string(), "/tmp/b".to_string())]
+    );
+
+    // 预设移除是按 agent 压制,幂等
+    store.add_removed_default("codex").unwrap();
+    store.add_removed_default("codex").unwrap();
+    assert_eq!(store.list_removed_defaults().unwrap(), vec!["codex".to_string()]);
+
+    // 编辑的原子替换:自定义换路径 / 预设改自定义 / 换 agent,全走单事务
+    store.add_custom_root("grok", "/tmp/g1").unwrap();
+    store.replace_location("grok", Some("/tmp/g1"), "grok", "/tmp/g2").unwrap();
+    assert_eq!(
+        store.list_custom_roots().unwrap(),
+        vec![
+            ("claude-code".to_string(), "/tmp/b".to_string()),
+            ("grok".to_string(), "/tmp/g2".to_string()),
+        ]
+    );
+    store.replace_location("kiro", None, "kiro", "/tmp/k").unwrap();
+    assert!(store.list_removed_defaults().unwrap().contains(&"kiro".to_string()));
+    store.replace_location("grok", Some("/tmp/g2"), "cursor", "/tmp/cur").unwrap();
+    let roots = store.list_custom_roots().unwrap();
+    assert!(roots.iter().any(|(a, p)| a == "cursor" && p == "/tmp/cur"));
+    assert!(!roots.iter().any(|(a, _)| a == "grok"));
+
+    // Restore defaults 语义:自定义与预设移除一把双清
+    store.add_custom_root("grok", "/tmp/c").unwrap();
+    store.clear_location_overrides().unwrap();
+    assert!(store.list_custom_roots().unwrap().is_empty());
+    assert!(store.list_removed_defaults().unwrap().is_empty());
+}
+
+/// 增量写入的胜者裁决在写事务内:败方副本(旧 mtime、异路径)一字不写,
+/// 反超后按规则接管(2026-08-24 Codex review)
+#[test]
+fn guarded_write_respects_winner() {
+    let (_dir, store) = temp_store();
+    let mut winner = meta("codex:g", "胜者");
+    winner.file_path = "/live/g.jsonl".into();
+    store.write_session(&winner, 9, &[]).unwrap();
+
+    let mut loser = meta("codex:g", "败方");
+    loser.file_path = "/backup/g.jsonl".into();
+    assert!(!store.write_session_guarded(&loser, 5, &[]).unwrap(), "败方不该写入");
+    assert_eq!(store.get_session("codex:g").unwrap().unwrap().file_path, "/live/g.jsonl");
+
+    assert!(store.write_session_guarded(&loser, 12, &[]).unwrap(), "反超应接管");
+    assert_eq!(store.get_session("codex:g").unwrap().unwrap().file_path, "/backup/g.jsonl");
+}

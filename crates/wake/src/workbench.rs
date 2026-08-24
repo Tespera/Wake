@@ -37,7 +37,7 @@ use gpui_component::{
     StyledExt as _, TitleBar, WindowExt as _,
 };
 
-use wake_core::adapters::{create_adapters, AgentAdapter};
+use wake_core::adapters::{adapter_for, create_adapters_for, path_owns, AgentAdapter};
 use wake_core::db::Store;
 use wake_core::models::*;
 use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
@@ -45,7 +45,9 @@ use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
 use crate::ui::*;
-use crate::format::{abs_date, display_file_path, fmt_tokens, one_line, relative_time, tilde_path};
+use crate::format::{
+    abs_date, display_file_path, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path,
+};
 
 actions!(wake, [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]);
 
@@ -54,6 +56,8 @@ pub const KEY_CONTEXT: &str = "Workbench";
 pub const PALETTE_CONTEXT: &str = "WakePalette";
 /// ⌘K 面板内容总高(输入行 + 结果列表 + footer);列表 flex_1 吃剩余空间
 const PALETTE_HEIGHT: Pixels = px(492.);
+/// location 表单标签列宽(Agent/Folder 两行共用)
+const FORM_LABEL_W: Pixels = px(52.);
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -121,7 +125,7 @@ impl ListDelegate for SessionsDelegate {
                     .gap(SPACE_XS)
                     .child(
                         h_flex()
-                            .gap_1p5()
+                            .gap(px(6.))
                             .child(
                                 div()
                                     .flex_1()
@@ -149,7 +153,7 @@ impl ListDelegate for SessionsDelegate {
                     )
                     .child(
                         h_flex()
-                            .gap_1p5()
+                            .gap(px(6.))
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .child(img(s.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
@@ -206,12 +210,12 @@ impl ListDelegate for SearchDelegate {
             ListItem::new(ix.row).rounded(theme.radius).child(
                 v_flex()
                     .w_full()
-                    .px_2()
-                    .py_2p5()
-                    .gap_1p5()
+                    .px(SPACE_SM)
+                    .py(SPACE_SM)
+                    .gap(px(6.))
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(SPACE_SM)
                             .text_size(FONT_CAPTION)
                             .child(img(h.session.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
                             .child(
@@ -309,7 +313,7 @@ impl ListDelegate for SearchDelegate {
             .w_full()
             .items_center()
             .justify_center()
-            .gap_3()
+            .gap(SPACE_MD)
             .text_color(theme.muted_foreground)
             .child(icon("icons/inbox.svg").with_size(px(24.)))
             .child(
@@ -336,8 +340,8 @@ impl ListDelegate for SearchDelegate {
         }
         Some(
             div()
-                .px_2()
-                .pb_1()
+                .px(SPACE_SM)
+                .pb(SPACE_XS)
                 .text_size(FONT_LABEL)
                 .text_color(cx.theme().muted_foreground)
                 .child("Short query — using fallback search. Longer keywords are faster."),
@@ -386,6 +390,14 @@ pub struct Workbench {
     /// 用户主动重扫中(模态进度弹窗开着,阻断其他操作)。与 scan.scanning 正交:
     /// 那是"扫没扫",这是"要不要弹模态"
     refreshing: bool,
+    /// location 变更撞上进行中的扫描时置位:那轮扫描持旧 roster,不补扫的话
+    /// 新根不收录、被移根不出清,要等手动 ⌘R(2026-08-24 Codex review)。
+    /// 终态事件到达后由 on_bg_event 消费,用新 roster 补一轮增量
+    pending_rescan: bool,
+    /// location 变更成功后置位:面板等**补扫终态**再重开——立即重开抓到的是
+    /// 扫描前的计数快照,新根会一直显示 0(2026-08-24 Codex review)。补扫
+    /// 是增量,通常亚秒;期间成功通知先行反馈。用户若已开了别的弹窗则放弃重开
+    reopen_locations_after_scan: bool,
     /// 全量解析进度 (done, total);None = 仍在枚举文件。
     /// 用 Rc<Cell> 而非 entity 字段:进度弹窗 builder 在本 entity 的
     /// render 期间执行,entity.read(cx) 会 double-lease panic。
@@ -422,6 +434,22 @@ struct DataSourceRow {
     tally: SharedString,
     /// 路径当前存在(行是否可点)
     exists: bool,
+    /// Some(落库路径) = 自定义行(路径可能是本行根的上层目录);None = 预设行
+    custom: Option<SharedString>,
+}
+
+/// location 表单的语义目标。预设行的"编辑/删除"落库为**压制默认 + 记自定义**:
+/// 默认根随 env(CODEX_HOME 等)在构造时活解析,不能物化成一行路径
+#[derive(Clone)]
+enum FormTarget {
+    Add,
+    /// 编辑既有一行。custom=true:path 是落库的自定义路径(编辑单位);
+    /// custom=false:path 是被点预设行的展示路径(无改动判定与 Finder 用)
+    Edit {
+        agent: AgentId,
+        path: SharedString,
+        custom: bool,
+    },
 }
 
 impl Workbench {
@@ -441,7 +469,7 @@ impl Workbench {
             }
         };
         let store = Arc::new(store);
-        let adapters: Arc<Vec<Box<dyn AgentAdapter>>> = Arc::new(create_adapters());
+        let adapters = Self::build_roster(&store);
 
         let list_state = cx.new(|cx| {
             ListState::new(
@@ -516,6 +544,8 @@ impl Workbench {
                 ..Default::default()
             },
             refreshing: false,
+            pending_rescan: false,
+            reopen_locations_after_scan: false,
             refresh_progress: Rc::new(Cell::new(None)),
             total_sessions: 0,
             list_state,
@@ -638,7 +668,7 @@ impl Workbench {
                         .gap(SPACE_LG)
                         .child(
                             h_flex()
-                                .gap_2()
+                                .gap(SPACE_SM)
                                 .child(Spinner::new().small())
                                 .child(
                                     div()
@@ -660,9 +690,10 @@ impl Workbench {
     }
 
     /// "Wake 读哪些路径"面板(侧栏底部数据源钮)。列全十三家含本机没装的,
-    /// 呼应"只读你的目录、零网络"的产品承诺。数据在打开前一次算好 move 进
-    /// 闭包——dialog builder 在宿主 render 期间执行,闭包内 read 宿主 entity
-    /// 必 double-lease panic
+    /// 呼应"只读你的目录、零网络"的产品承诺;行点击即编辑,底部 Add location
+    /// 打开增改删共用的表单。数据在打开前一次算好
+    /// move 进闭包——dialog builder 在宿主 render 期间执行,闭包内 read 宿主
+    /// entity 必 double-lease panic
     fn show_data_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // 数据源**必须**读 self.adapters——与 scanner/watcher/refresh 同一份
         // 实例。根路径是构造时刻对 env(CODEX_HOME/XDG_DATA_HOME)与文件系统
@@ -673,7 +704,7 @@ impl Workbench {
         // 独立 flat_map 再按位置 zip 计数,靠的是遍历顺序一致这条隐形契约。
         // 文本一律预先算成 SharedString:dialog builder 存的是 Rc<dyn Fn>,
         // 面板开着时每帧重跑,留 format!/String::clone 在里面就是每帧堆分配
-        let flat: Vec<(AgentId, PathBuf)> = self
+        let mut flat: Vec<(AgentId, PathBuf)> = self
             .adapters
             .iter()
             .flat_map(|a| {
@@ -681,6 +712,10 @@ impl Workbench {
                 a.data_roots().into_iter().map(move |r| (agent, r))
             })
             .collect();
+        // 按 AgentId 声明序稳定排序:自定义根紧随该家默认根之后成组展示
+        // (roster 里 customs 追加在尾部,不排会飘到列表底部与所属家分离);
+        // 稳定排序保证同家内默认在前、codex 的 sessions/archived 相邻不散
+        flat.sort_by_key(|(a, _)| *a);
         // 带上 agent:计数按 (agent, 根) 归属,不然一家的根被 env 搬进另一家
         // 树下时,会话会整批记到别家行上
         let prefixes: Vec<(String, String)> = flat
@@ -691,6 +726,12 @@ impl Workbench {
             .store
             .counts_by_path_prefix(&prefixes)
             .unwrap_or_else(|_| vec![0; prefixes.len()]);
+        // 直接查库,不设镜像字段:面板打开是点击路径,微秒级查询无需缓存
+        let (customs, removed) = self.store.location_overrides();
+        let customs: Vec<(AgentId, SharedString)> = customs
+            .into_iter()
+            .map(|(a, p)| (a, SharedString::from(p.to_string_lossy().to_string())))
+            .collect();
         let rows: Vec<DataSourceRow> = flat
             .iter()
             .zip(prefixes)
@@ -698,15 +739,23 @@ impl Workbench {
             .map(|(((agent, root), (_, raw)), n)| {
                 // 存在性逐路径判断:某家的归档目录可能还没建,不该按整家一刀切
                 let exists = root.exists();
+                // 本行根落在同家某个自定义 location 之下 → 可移除行。
+                // 携带**落库路径**而非本行根:codex 一个自定义家目录派生
+                // sessions/archived 两行,删除按落库那条删
+                let custom = custom_owner(&customs, *agent, &raw).cloned();
                 DataSourceRow {
                     agent: *agent,
                     display: tilde_path(&raw).into(),
                     raw: raw.into(),
                     tally: if exists { n.to_string().into() } else { "Not found".into() },
                     exists,
+                    custom,
                 }
             })
             .collect();
+        // 有任何偏离(自定义或被移除的预设)才给 Restore defaults 出场
+        let diverged = !customs.is_empty() || !removed.is_empty();
+        let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, cx| {
             let theme = cx.theme();
             // 左右内边距从默认 24 收到 14,让出的 10px 由标题与各行自己的
@@ -732,7 +781,27 @@ impl Workbench {
                             .max_h(px(400.))
                             .overflow_y_scroll()
                             .children(rows.iter().enumerate().map(|(ix, row)| {
-                                let raw = row.raw.clone();
+                                // 点击行 = 编辑(2026-08-24 定稿)
+                                // 表单与 with_custom_root 的契约是**目录**;SQLite
+                                // 型预设行的 raw 是库文件,预填其父目录——照文件
+                                // 路径保存会拼出 <db>/<db> 的死路径(Codex review)
+                                let edit_path = row.custom.clone().unwrap_or_else(|| {
+                                    let raw = row.raw.as_ref();
+                                    if std::path::Path::new(raw).is_file() {
+                                        std::path::Path::new(raw)
+                                            .parent()
+                                            .map(|p| SharedString::from(p.to_string_lossy().to_string()))
+                                            .unwrap_or_else(|| row.raw.clone())
+                                    } else {
+                                        row.raw.clone()
+                                    }
+                                });
+                                let edit_target = FormTarget::Edit {
+                                    agent: row.agent,
+                                    custom: row.custom.is_some(),
+                                    path: edit_path,
+                                };
+                                let edit_entity = entity.clone();
                                 h_flex()
                                     .id(("data-source-row", ix))
                                     .h(ROW_HEIGHT_SUB)
@@ -743,12 +812,13 @@ impl Workbench {
                                     .rounded(theme.radius)
                                     .gap(SPACE_SM)
                                     .items_center()
-                                    .when(row.exists, |el| {
-                                        el.cursor_pointer()
-                                            .hover(|s| s.bg(theme.secondary_hover))
-                                            .on_click(move |_, _, _| {
-                                                terminal::open_in_finder(&raw)
-                                            })
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.secondary_hover))
+                                    .on_click(move |_, window, cx| {
+                                        let t = edit_target.clone();
+                                        edit_entity.update(cx, |this, cx| {
+                                            this.open_location_form(t, window, cx)
+                                        });
                                     })
                                     .child(
                                         img(row.agent.brand_icon(theme.mode.is_dark()))
@@ -774,16 +844,14 @@ impl Workbench {
                                             .child(row.display.clone()),
                                     )
                                     .child(
+                                        // 尾列纯计数 badge:悬停工具试过、用户否决
+                                        // (2026-08-24,Finder/移除挪进编辑表单)
                                         h_flex()
                                             .w(px(88.))
                                             .flex_shrink_0()
                                             .justify_end()
                                             .text_size(FONT_LABEL)
                                             .child({
-                                                // 有目录取中性灰(同项目名 badge);目录不在
-                                                // 取 warning 淡底 tint——这是"本机没这家"的
-                                                // 陈述而非报错,不用实心告警色。文字实色,
-                                                // 只有底叠 opacity
                                                 // 有目录取中性灰(同项目名 badge);目录不在
                                                 // 取 warning 淡底 tint——这是"本机没这家"的
                                                 // 陈述而非报错,不用实心告警色。文字实色,
@@ -797,9 +865,579 @@ impl Workbench {
                                             }),
                                     )
                             })),
+                    )
+                    .child(div().h(px(1.)).bg(theme.border).mx(px(10.)))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                // 底部添加按钮:加号与行图标同列对齐(px10 内边
+                                // 同构),hover 胶囊只包按钮本体——整行 hover
+                                // 否决(2026-08-24);上方 hairline 与侧栏
+                                // footer 同语言,分开数据区与动作区
+                                h_flex()
+                                    .id("add-location")
+                                    .h(ROW_HEIGHT_SUB)
+                                    .px(px(10.))
+                                    .rounded(theme.radius)
+                                    .gap(SPACE_SM)
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .text_color(theme.muted_foreground)
+                                    .hover(|s| s.bg(theme.secondary_hover))
+                                    .on_click({
+                                        let entity = entity.clone();
+                                        move |_, window, cx| {
+                                            // 面板不关:dialog 是栈,表单压在其上,
+                                            // esc/取消原生弹回面板
+                                            entity.update(cx, |this, cx| {
+                                                this.open_location_form(FormTarget::Add, window, cx)
+                                            });
+                                        }
+                                    })
+                                    .child(icon("icons/plus.svg").with_size(px(14.)).flex_shrink_0())
+                                    .child(div().text_size(FONT_CAPTION).child("Add location")),
+                            )
+                            .when(diverged, |el| {
+                                el.child(
+                                    // 恢复初始:清空全部偏离,回到内置默认路径
+                                    h_flex()
+                                        .id("restore-defaults")
+                                        .h(ROW_HEIGHT_SUB)
+                                        .px(px(10.))
+                                        .rounded(theme.radius)
+                                        .items_center()
+                                        .cursor_pointer()
+                                        .text_color(theme.muted_foreground)
+                                        .hover(|s| s.bg(theme.secondary_hover))
+                                        .on_click({
+                                            let entity = entity.clone();
+                                            move |_, window, cx| {
+                                                window.close_dialog(cx);
+                                                entity.update(cx, |this, cx| {
+                                                    this.restore_default_locations(window, cx)
+                                                });
+                                            }
+                                        })
+                                        .child(div().text_size(FONT_CAPTION).child("Restore defaults")),
+                                )
+                            }),
                     ),
             )
         });
+    }
+
+    /// store 的 location 配置 → roster。new 与 rebuild_roster 共用;解析与
+    /// 组装都在 wake-core(create_adapters_for),与 scan CLI 同一条路
+    fn build_roster(store: &Arc<Store>) -> Arc<Vec<Box<dyn AgentAdapter>>> {
+        Arc::new(create_adapters_for(store))
+    }
+
+    /// location 配置变更后的唯一 roster 换代点:同一处换 Arc + 重启 watcher,
+    /// 新旧两份实例不共存(不变量 8 的运行时补充:"单实例"指任一时刻只有一份
+    /// 在服务,换代必须整体换、所有消费方跟随新 Arc)
+    fn rebuild_roster(&mut self, cx: &mut Context<Self>) {
+        // 先撤旧 watcher 并等它退出(SessionWatcher::Drop 内 join):旧线程持
+        // 旧 roster,不等收尾,已移除根的会话可能在补扫后被写回复活
+        self.watcher = None;
+        self.adapters = Self::build_roster(&self.store);
+        self.watcher = start_watcher(self.adapters.clone(), self.store.clone(), self.scan_events.clone());
+        cx.notify();
+    }
+
+    /// location 表单(添加/编辑共用一套 UI,2026-08-24 定稿):agent 下拉 +
+    /// 路径输入框(可手输,~ 展开)+ 目录选择按钮;Cancel/Save 只在有改动时
+    /// 出现。压栈在面板之上,esc/取消原生弹回
+    fn open_location_form(&mut self, target: FormTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let (title, ok_label, init_agent, init_path): (
+            &'static str,
+            &'static str,
+            AgentId,
+            SharedString,
+        ) = match &target {
+            FormTarget::Add => ("Add location", "Add", AgentId::ClaudeCode, "".into()),
+            FormTarget::Edit { agent, path, .. } => ("Edit location", "Save", *agent, path.clone()),
+        };
+        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("/absolute/folder/path"));
+        if !init_path.is_empty() {
+            let v = init_path.clone();
+            path_input.update(cx, |st, cx| st.set_value(v, window, cx));
+        }
+        // 编辑态动作行的 Finder 只挂真实存在的路径——目录或 SQLite 库文件都算
+        // (open_in_finder 对文件走 reveal 选中;用 is_dir 会把三家库文件行的
+        // Finder 恒隐藏,2026-08-24 Codex review)。fs 探测一次,不进每帧 builder
+        let edit_exists = match &target {
+            FormTarget::Add => None,
+            FormTarget::Edit { path, .. } => Some(std::path::Path::new(path.as_ref()).exists()),
+        };
+        // 表单状态放 Rc<Cell>/entity 而非宿主字段:builder 每帧重跑,闭包内
+        // read 宿主 entity 必 double-lease panic(与 refresh 进度弹窗同一约束)
+        let selected: Rc<Cell<AgentId>> = Rc::new(Cell::new(init_agent));
+        let dirty_init_agent = init_agent;
+        let dirty_init_path = init_path;
+        let entity = cx.entity();
+        let title: SharedString = title.into();
+        let ok_label: SharedString = ok_label.into();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let theme = cx.theme();
+            let dark = theme.mode.is_dark();
+            // 内容轴缩进 = small 按钮的水平内边距:字段行/标题/footer 以它为轴,
+            // 动作行的胶囊钮**不缩进**——可见内容(内边距之后)恰好落轴,hover
+            // 胶囊完整留在内容盒内。负 margin 会溢出被裁(locations 面板同一教训)
+            let field_inset = BUTTON_SM_PX;
+            let sel = selected.get();
+            // 脏状态:与初始 (agent, path) 有差且路径非空才亮出 Cancel/Save
+            // ——没改动时无可保存,收手走 esc/关闭即可(2026-08-24 用户定稿)。
+            // Rope 直接与 &str 比较 + chars 扫描:builder 每帧跑,禁 to_string
+            let dirty = {
+                let text = path_input.read(cx).text();
+                (sel != dirty_init_agent || *text != dirty_init_path.as_ref())
+                    && text.chars().any(|c| !c.is_whitespace())
+            };
+            let sel_cell = selected.clone();
+            let browse_entity = entity.clone();
+            let browse_input = path_input.clone();
+            let ok_entity = entity.clone();
+            let ok_input = path_input.clone();
+            let ok_sel = selected.clone();
+            let ok_target = target.clone();
+            let action_target = target.clone();
+            let dialog = dialog
+                .title(
+                    div()
+                        .pl(field_inset)
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child(title.clone()),
+                )
+                .w(px(500.))
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default().ok_text(ok_label.clone()),
+                )
+                .child(
+                    v_flex()
+                        .gap(SPACE_MD)
+                        .child(
+                            h_flex()
+                                .px(field_inset)
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(FORM_LABEL_W)
+                                        .flex_shrink_0()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child("Agent"),
+                                )
+                                .child(
+                                    // Button 走 ParentElement 自组内容:品牌图标是
+                                    // PNG(img),进不了 .icon()(那只收单色 SVG),
+                                    // 图标+名字+箭头必须同住按钮内(2026-08-24 反馈)
+                                    Button::new("loc-agent")
+                                        .outline()
+                                        .rounded(RADIUS_BUTTON)
+                                        .child(
+                                            h_flex()
+                                                .gap(SPACE_SM)
+                                                .items_center()
+                                                .child(
+                                                    img(sel.brand_icon(dark))
+                                                        .size(px(14.))
+                                                        .flex_shrink_0(),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(FONT_CAPTION)
+                                                        .child(sel.display_name()),
+                                                )
+                                                .child(
+                                                    icon("icons/chevron-down.svg")
+                                                        .with_size(px(12.))
+                                                        .text_color(theme.muted_foreground),
+                                                ),
+                                        )
+                                        .dropdown_menu(move |menu, _, _| {
+                                            let mut menu = menu.min_w(px(200.));
+                                            for a in AgentId::ALL {
+                                                let cell = sel_cell.clone();
+                                                // element 变体:菜单项带品牌 PNG
+                                                //(纯文本项的 icon 只收单色 SVG)
+                                                menu = menu.item(
+                                                    PopupMenuItem::element(move |_, _| {
+                                                        h_flex()
+                                                            .gap(SPACE_SM)
+                                                            .items_center()
+                                                            .child(
+                                                                img(a.brand_icon(dark))
+                                                                    .size(px(14.))
+                                                                    .flex_shrink_0(),
+                                                            )
+                                                            .child(a.display_name())
+                                                    })
+                                                    .checked(sel == a)
+                                                    .on_click(move |_, window, _| {
+                                                        cell.set(a);
+                                                        window.refresh();
+                                                    }),
+                                                );
+                                            }
+                                            menu
+                                        }),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .px(field_inset)
+                                .gap(SPACE_SM)
+                                .items_center()
+                                .child(
+                                    div()
+                                        .w(FORM_LABEL_W)
+                                        .flex_shrink_0()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child("Folder"),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&browse_input)))
+                                .child(
+                                    Button::new("loc-browse")
+                                        .outline()
+                                        .rounded(RADIUS_BUTTON)
+                                        .icon(icon("icons/folder.svg").with_size(px(13.)))
+                                        .tooltip("Choose a folder")
+                                        .on_click({
+                                            let entity = browse_entity.clone();
+                                            let input = browse_input.clone();
+                                            move |_, window, cx| {
+                                                let input = input.clone();
+                                                entity.update(cx, |this, cx| {
+                                                    this.browse_for_location(input, window, cx)
+                                                });
+                                            }
+                                        }),
+                                ),
+                        )
+                        .when_some(edit_exists, |el, exists| {
+                            let FormTarget::Edit { agent, path, custom } = action_target.clone()
+                            else {
+                                unreachable!("edit_exists 仅在 Edit 目标下为 Some")
+                            };
+                            let remove_entity = entity.clone();
+                            el.child(
+                                // 动作行遵循破坏性靠左惯例:Remove 靠左、Show in
+                                // Finder 靠右。两钮手排:内边距 = 轴缩进,Remove
+                                // 左侧再减 1.5 补 lucide 字形内白(24 视框留 3
+                                // 单位),字形左缘正落标签轴;右钮文字右缘正落
+                                // 浏览钮右缘。全正值内边距,胶囊完整在内容盒里
+                                h_flex()
+                                    .pt(SPACE_XS)
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        h_flex()
+                                            .id("loc-remove")
+                                            .h(BUTTON_SM_H)
+                                            .pl(BUTTON_SM_PX - px(1.5))
+                                            .pr(BUTTON_SM_PX)
+                                            .rounded(RADIUS_BUTTON)
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .cursor_pointer()
+                                            .text_size(FONT_BODY)
+                                            .text_color(theme.danger)
+                                            .hover(|s| s.bg(theme.danger.opacity(0.1)))
+                                            .active(|s| s.bg(theme.danger.opacity(0.16)))
+                                            .on_click({
+                                                let remove_entity = remove_entity.clone();
+                                                let stored = custom.then(|| path.clone());
+                                                move |_, window, cx| {
+                                                    // 整栈收场(表单+过期面板);
+                                                    // delete 内会重开新快照面板
+                                                    window.close_all_dialogs(cx);
+                                                    let stored = stored.clone();
+                                                    remove_entity.update(cx, |this, cx| {
+                                                        this.delete_location(
+                                                            agent, stored, window, cx,
+                                                        )
+                                                    });
+                                                }
+                                            })
+                                            .child(
+                                                icon("icons/trash-2.svg")
+                                                    .with_size(px(13.))
+                                                    .flex_shrink_0(),
+                                            )
+                                            .child("Remove"),
+                                    )
+                                    .when(exists, |el| {
+                                        el.child(
+                                            h_flex()
+                                                .id("loc-reveal")
+                                                .h(BUTTON_SM_H)
+                                                .px(BUTTON_SM_PX)
+                                                .rounded(RADIUS_BUTTON)
+                                                .items_center()
+                                                .gap(px(6.))
+                                                .cursor_pointer()
+                                                .text_size(FONT_BODY)
+                                                .text_color(theme.foreground)
+                                                .hover(|s| s.bg(theme.secondary_hover))
+                                                .active(|s| s.bg(theme.secondary_active))
+                                                .on_click(move |_, _, _| {
+                                                    terminal::open_in_finder(&path)
+                                                })
+                                                .child(
+                                                    icon("icons/folder.svg")
+                                                        .with_size(px(13.))
+                                                        .flex_shrink_0()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                                .child("Show in Finder"),
+                                        )
+                                    }),
+                            )
+                        }),
+                )
+                .on_ok(move |_, window, cx| {
+                    let path_text = ok_input.read(cx).text().to_string();
+                    let agent = ok_sel.get();
+                    ok_entity.update(cx, |this, cx| {
+                        this.commit_location_form(ok_target.clone(), agent, path_text, window, cx)
+                    })
+                });
+            if dirty {
+                dialog.footer(move |ok, cancel, window, cx| {
+                    vec![h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap(SPACE_SM)
+                        .px(field_inset)
+                        .child(cancel(window, cx))
+                        .child(ok(window, cx))]
+                })
+            } else {
+                dialog
+            }
+        });
+    }
+
+    /// 表单的目录选择按钮:系统选择器,选中即回填输入框(取消无事发生)
+    fn browse_for_location(
+        &mut self,
+        input: Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let dir = match rx.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => paths.into_iter().next().unwrap(),
+                _ => return,
+            };
+            let text = dir.to_string_lossy().to_string();
+            this.update_in(cx, |_, window, cx| {
+                input.update(cx, |st, cx| st.set_value(text, window, cx));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 表单落库。返回值交给 on_ok:false = 表单留着(校验没过,或已手工收场)。
+    /// 纯路径管理:不校验目录内容(2026-08-24 用户定稿),只拒空/相对路径与
+    /// 同家重叠;预设行的编辑落库为"压默认 + 记自定义"
+    fn commit_location_form(
+        &mut self,
+        target: FormTarget,
+        agent_new: AgentId,
+        raw_text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let expanded = expand_tilde(raw_text.trim());
+        let path = if expanded.len() > 1 {
+            expanded.trim_end_matches('/').to_string()
+        } else {
+            expanded
+        };
+        if path.is_empty() || !path.starts_with('/') {
+            window.push_notification(Notification::warning("Enter an absolute folder path"), cx);
+            return false;
+        }
+        // 各家归一化(codex:直选 sessions 树/平铺 archived 上提到家层,侧档
+        // 找回)。静态分派,不依赖该家实例是否还在 roster(默认被移除时也要
+        // 生效);归一化后再做无改动/重叠判定,选中默认根数据子目录会正确判"已覆盖"
+        let path = wake_core::adapters::normalize_custom_root(
+            agent_new,
+            std::path::PathBuf::from(&path),
+        )
+        .to_string_lossy()
+        .to_string();
+        // 没改就没事:直接让机制关表单,面板未过期。旧目标也要**同规归一化**
+        // 再比——默认 Codex 的 sessions/archived 行原路径归一化后即 home,不归一
+        // 化就比,单按 Enter 会被误判成编辑、静默把默认改成"压默认+记自定义"
+        //(2026-08-24 Codex review)
+        let unchanged = match &target {
+            FormTarget::Add => false,
+            FormTarget::Edit { agent, path: p, .. } => {
+                *agent == agent_new
+                    && wake_core::adapters::normalize_custom_root(
+                        *agent,
+                        std::path::PathBuf::from(p.as_ref()),
+                    )
+                    .to_string_lossy()
+                        == path
+            }
+        };
+        if unchanged {
+            return true;
+        }
+        // 同家重叠检查,排除被编辑单元自身派生的根(自定义单元 = 其落库路径
+        // 之下的根;预设单元 = 不属于任何该家自定义的根)。嵌进**别家**树里
+        // 是合法场景(env 根的先例),同家嵌套才是重复读取
+        let customs: Vec<(AgentId, SharedString)> = self
+            .store
+            .location_overrides()
+            .0
+            .into_iter()
+            .map(|(a, p)| (a, SharedString::from(p.to_string_lossy().to_string())))
+            .collect();
+        let covered = self
+            .adapters
+            .iter()
+            .filter(|a| a.agent() == agent_new)
+            .flat_map(|a| a.data_roots())
+            .any(|r| {
+                let rs = r.to_string_lossy().to_string();
+                let excluded = match &target {
+                    FormTarget::Add => false,
+                    FormTarget::Edit { agent, path: unit, custom: true } => {
+                        *agent == agent_new && path_owns(unit.as_ref(), &rs)
+                    }
+                    FormTarget::Edit { agent, custom: false, .. } => {
+                        *agent == agent_new && custom_owner(&customs, agent_new, &rs).is_none()
+                    }
+                };
+                !excluded && (path_owns(&path, &rs) || path_owns(&rs, &path))
+            });
+        if covered {
+            window.push_notification(
+                Notification::info("This folder is already in Wake's session locations"),
+                cx,
+            );
+            return false;
+        }
+        let res = match &target {
+            FormTarget::Add => self.store.add_custom_root(agent_new.as_str(), &path),
+            // 全形态单事务(含换 agent 的编辑):半程失败不得把配置改成半生效
+            //(Codex review P2)
+            FormTarget::Edit { agent, path: old, custom } => self.store.replace_location(
+                agent.as_str(),
+                custom.then(|| old.as_ref()),
+                agent_new.as_str(),
+                &path,
+            ),
+        };
+        if let Err(e) = res {
+            window.push_notification(Notification::error(format!("Save failed: {e}")), cx);
+            return false;
+        }
+        // 整栈收场(表单+过期的面板快照),统一收尾重开新面板。
+        // 返回 false 阻止机制再 pop(那会关掉刚开的新面板)
+        window.close_all_dialogs(cx);
+        let note = match &target {
+            FormTarget::Add => "Location added",
+            FormTarget::Edit { .. } => "Location updated",
+        };
+        self.apply_location_change(Ok(()), "", Notification::success(note), window, cx);
+        false
+    }
+
+    /// 删除一个 location(编辑表单内的 Remove):自定义 = 删记录;预设 =
+    /// 压制该家默认实例(codex 的 sessions/archived 同属一实例,成对消失)。
+    /// 磁盘文件不动,根下会话按"不在枚举范围"出清,收藏/置顶独立留存
+    fn delete_location(
+        &mut self,
+        agent: AgentId,
+        custom: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let res = match &custom {
+            Some(stored) => self.store.remove_custom_root(agent.as_str(), stored),
+            None => self.store.add_removed_default(agent.as_str()),
+        };
+        self.apply_location_change(
+            res,
+            "Remove failed",
+            Notification::info("Location removed"),
+            window,
+            cx,
+        );
+    }
+
+    /// Restore defaults:清空全部偏离(自定义 + 被移除的预设),回到内置默认
+    fn restore_default_locations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let res = self.store.clear_location_overrides();
+        self.apply_location_change(
+            res,
+            "Restore failed",
+            Notification::info("Locations restored to defaults"),
+            window,
+            cx,
+        );
+    }
+
+    /// location 变更的统一收尾(删/恢复/表单提交成功共用):失败提示后立即回
+    /// 面板;成功则 roster 换代 + 补增量 + 提示,面板等补扫终态再重开(此时
+    /// 计数才是真值)——第四个变更入口出现时,收尾步骤只在这里长
+    fn apply_location_change(
+        &mut self,
+        res: anyhow::Result<()>,
+        err_prefix: &'static str,
+        ok_note: Notification,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match res {
+            Err(e) => {
+                window.push_notification(Notification::error(format!("{err_prefix}: {e}")), cx);
+                self.show_data_sources(window, cx);
+            }
+            Ok(()) => {
+                self.rebuild_roster(cx);
+                self.reopen_locations_after_scan = true;
+                self.kick_incremental_scan(cx);
+                window.push_notification(ok_note, cx);
+            }
+        }
+    }
+
+    /// roster 换代后补一轮增量:新根收录、被移根出清。撞上进行中的扫描
+    /// (变更后面板自动重开,连续操作两次就会撞)则排队,由终态事件补扫
+    fn kick_incremental_scan(&mut self, cx: &mut Context<Self>) {
+        if self.scan.scanning {
+            self.pending_rescan = true;
+            return;
+        }
+        self.scan = ScanProgress {
+            scanning: true,
+            ..Default::default()
+        };
+        cx.notify();
+        spawn_scan(
+            self.adapters.clone(),
+            self.store.clone(),
+            self.scan_events.clone(),
+            false,
+        );
     }
 
     fn on_bg_event(&mut self, ev: BgEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -820,6 +1458,20 @@ impl Workbench {
                     window.push_notification(note, cx);
                 }
                 self.scan = p;
+                // 扫描期间发生过 location 变更:那轮用的是旧 roster,
+                // 终态一到立刻用当前 roster 补一轮增量
+                if !self.scan.scanning && self.pending_rescan {
+                    self.pending_rescan = false;
+                    self.kick_incremental_scan(cx);
+                }
+                // location 变更的面板重开等到终态:此刻计数才是真值。
+                // 用户若在空档里开了别的弹窗(⌘K 等),不去压它
+                if !self.scan.scanning && self.reopen_locations_after_scan {
+                    self.reopen_locations_after_scan = false;
+                    if !window.has_active_dialog(cx) {
+                        self.show_data_sources(window, cx);
+                    }
+                }
                 cx.notify();
             }
             BgEvent::Changed => self.refresh(window, cx),
@@ -909,7 +1561,7 @@ impl Workbench {
                         // 定高 + 列表 flex_1:输入行/footer 尺寸变化时列表自适应,
                         // 不用手工重算列表高度
                         .h(PALETTE_HEIGHT)
-                        .gap_3()
+                        .gap(SPACE_MD)
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -987,7 +1639,7 @@ impl Workbench {
                                 .child("Scope: all sessions")
                                 .child(
                                     h_flex()
-                                        .gap_3()
+                                        .gap(SPACE_MD)
                                         .child("\u{2191}\u{2193} navigate")
                                         .child("\u{21a9} open")
                                         .child("esc close"),
@@ -1133,7 +1785,9 @@ impl Workbench {
 
         let adapters = self.adapters.clone();
         let task = cx.background_spawn(async move {
-            let adapter = adapters.iter().find(|a| a.agent() == meta.agent)?;
+            // adapter_for 按文件路径挑实例:自定义 location 的会话必须由
+            // 拥有其根的实例解析(gemini/kimi 的 cwd 反查是实例相对侧档)
+            let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)?;
             let r = SessionFileRef::from_meta(&meta);
             let t = adapter.parse_transcript(&r).ok()?;
             let visible: Vec<TranscriptMessage> = t
@@ -1287,7 +1941,7 @@ impl Workbench {
         let meta = detail.meta.clone();
         let adapters = self.adapters.clone();
         let task = cx.background_spawn(async move {
-            let adapter = adapters.iter().find(|a| a.agent() == meta.agent)?;
+            let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)?;
             // from_meta 对虚拟路径(SQLite 型)自动回退,导出不再依赖真实文件存在
             let r = SessionFileRef::from_meta(&meta);
             let t = adapter.parse_transcript(&r).ok()?;
@@ -1350,10 +2004,7 @@ impl Workbench {
         let Some(detail) = &self.detail else { return };
         let meta = detail.meta.clone();
         // 会话归属哪些磁盘路径(主文件/边车目录)是 adapter 的布局知识
-        let targets = self
-            .adapters
-            .iter()
-            .find(|a| a.agent() == meta.agent)
+        let targets = adapter_for(&self.adapters, meta.agent, &meta.file_path)
             .map(|a| a.session_paths(&meta))
             .unwrap_or_else(|| vec![meta.file_path.clone()]);
         let entity = cx.entity();
@@ -1363,17 +2014,31 @@ impl Workbench {
             let entity = entity.clone();
             let theme = cx.theme();
             dialog
-                .title(div().font_semibold().child("Delete this session?"))
+                .title(
+                    div()
+                        .text_size(FONT_HEADING)
+                        .font_semibold()
+                        .child("Delete this session?"),
+                )
                 .w(px(440.))
+                // 破坏性确认:主按钮点名动作并用 danger 形态,不留裸 "OK"。
+                // .confirm() 必须显式调用——Dialog 只在设了 footer 时才渲染
+                // 按钮行,只挂 on_ok 的弹窗实际无按钮(仅回车可确认)
+                .confirm()
+                .button_props(
+                    gpui_component::dialog::DialogButtonProps::default()
+                        .ok_text("Move to Trash")
+                        .ok_variant(gpui_component::button::ButtonVariant::Danger),
+                )
                 .child(
                     v_flex()
-                        .gap_2()
+                        .gap(SPACE_SM)
                         .text_size(FONT_BODY)
                         .child("The session file will be moved to Trash. You can restore it anytime:")
                         .child(
                             div()
-                                .px_2()
-                                .py_1()
+                                .px(SPACE_SM)
+                                .py(SPACE_XS)
                                 .rounded(theme.radius)
                                 .bg(theme.muted)
                                 .text_size(FONT_CAPTION)
@@ -1482,9 +2147,9 @@ impl Workbench {
                     ),
             )
             .child(
-                div().flex_shrink_0().px(SIDEBAR_EDGE).pb_3().child(
+                div().flex_shrink_0().px(SIDEBAR_EDGE).pb(SPACE_MD).child(
                     h_flex()
-                        .gap_2()
+                        .gap(SPACE_SM)
                         .child(
                             h_flex()
                                 .id("sidebar-search")
@@ -1532,8 +2197,8 @@ impl Workbench {
                 v_flex()
                     .flex_shrink_0()
                     .px(SIDEBAR_EDGE)
-                    .pb_1()
-                    .gap_1()
+                    .pb(SPACE_XS)
+                    .gap(SPACE_XS)
                     .child(sidebar_row(
                         "all",
                         RowLead::Icon(icon("icons/layers.svg")),
@@ -1571,9 +2236,9 @@ impl Workbench {
                     .min_h_0()
                     .overflow_y_scroll()
                     .px(SIDEBAR_EDGE)
-                    .pt_1()
-                    .pb_4()
-                    .gap_1()
+                    .pt(SPACE_XS)
+                    .pb(SPACE_LG)
+                    .gap(SPACE_XS)
                     .child(group_header(
                         "agents-header",
                         "Agents",
@@ -1664,7 +2329,7 @@ impl Workbench {
                             .py(SPACE_SM)
                             .items_center()
                             .justify_end()
-                            .gap_1()
+                            .gap(SPACE_XS)
                             .child(sidebar_tool_btn(
                                 "data-sources",
                                 "Session locations",
@@ -2036,7 +2701,7 @@ impl Workbench {
                     .gap(SPACE_SM)
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap(SPACE_SM)
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
@@ -2046,7 +2711,7 @@ impl Workbench {
                                 this.child(
                                     h_flex()
                                         .min_w_0()
-                                        .gap_1()
+                                        .gap(SPACE_XS)
                                         .child(icon("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0())
                                         .child(div().min_w_0().truncate().child(branch)),
                                 )
@@ -2055,7 +2720,7 @@ impl Workbench {
                     .child(
                         h_flex()
                             .justify_between()
-                            .gap_5()
+                            .gap(SPACE_LG)
                             .child(
                                 div()
                                     .flex_1()
@@ -2068,7 +2733,7 @@ impl Workbench {
                             .child(
                                 h_flex()
                                     .flex_shrink_0()
-                                    .gap_1()
+                                    .gap(SPACE_XS)
                                     .child({
                                         // Open In split 按钮(Codex/kooky 风):左段 = 上次
                                         // 目标的应用图标,点击直开;右段 chevron 展开列表。
@@ -2165,7 +2830,7 @@ impl Workbench {
                                                             menu = menu.item(
                                                                 PopupMenuItem::element(move |_, _| {
                                                                     h_flex()
-                                                                        .gap_2()
+                                                                        .gap(SPACE_SM)
                                                                         .items_center()
                                                                         .child(match &icon_path {
                                                                             Some(p) => img(p.clone())
@@ -2223,8 +2888,13 @@ impl Workbench {
                             ),
                     )
                     .child(
+                        // 元信息四行收成 4px 紧组:与标题区之间保持 SPACE_SM,
+                        // "组内紧、组间松"——四行等距摊开读起来像四个并列区块
+                        v_flex()
+                            .gap(SPACE_XS)
+                            .child(
                         h_flex()
-                            .gap_1p5()
+                            .gap(px(6.))
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .child(icon("icons/folder.svg").with_size(px(12.)).flex_shrink_0())
@@ -2246,7 +2916,7 @@ impl Workbench {
                             stats.push(format!("{} tokens", fmt_tokens(Some(tokens))));
                         }
                         h_flex()
-                            .gap_2()
+                            .gap(SPACE_SM)
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .when_some(meta.model.clone(), |this, model| {
@@ -2268,7 +2938,7 @@ impl Workbench {
                                     this.child(outline_badge(source, color))
                                 },
                             )
-                            .child(div().min_w_0().truncate().child(stats.join("  ·  ")))
+                            .child(div().min_w_0().truncate().child(stats.join(" · ")))
                     })
                     .child({
                         // 时间行:创建 / 最后活动,精确时间
@@ -2283,7 +2953,7 @@ impl Workbench {
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .truncate()
-                            .child(times.join("  ·  "))
+                            .child(times.join(" · "))
                     })
                     .child({
                         // 会话文件路径(header 末行):展示用折叠形态(~ 缩写 +
@@ -2291,7 +2961,7 @@ impl Workbench {
                         let file_path = meta.file_path.clone();
                         h_flex()
                             .id("detail-file-path")
-                            .gap_1p5()
+                            .gap(px(6.))
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .cursor_pointer()
@@ -2301,14 +2971,15 @@ impl Workbench {
                             })
                             .child(icon("icons/file-text.svg").with_size(px(12.)).flex_shrink_0())
                             .child(div().min_w_0().truncate().child(display_file_path(&meta.file_path)))
-                    }),
+                    })
+                    ),
             )
             .child(if detail.loading {
                 h_flex()
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .gap_2()
+                    .gap(SPACE_SM)
                     .text_color(theme.muted_foreground)
                     .child(Spinner::new().small())
                     .child(div().text_size(FONT_BODY).child("Loading session…"))
@@ -2576,6 +3247,19 @@ fn tool_cluster(
 
 /// 小胶囊 badge(项目名/model/source 共用):4px 圆角,内部截断。
 /// 项目名用 muted 灰;model/source 用主题色 tint(淡底+同色文字)。
+/// 该数据根是否派生自某条自定义 location(with_custom_root 契约保证派生根
+/// 全在其落库目录之下);返回落库路径。面板行标记与表单重叠排除共用同一判据
+fn custom_owner<'a>(
+    customs: &'a [(AgentId, SharedString)],
+    agent: AgentId,
+    root: &str,
+) -> Option<&'a SharedString> {
+    customs
+        .iter()
+        .find(|(a, p)| *a == agent && path_owns(p.as_ref(), root))
+        .map(|(_, p)| p)
+}
+
 fn badge(name: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> impl IntoElement {
     div()
         .min_w_0()

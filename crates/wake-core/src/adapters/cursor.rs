@@ -368,6 +368,12 @@ impl AgentAdapter for CursorAdapter {
         Ok(parse_cursor_jsonl(&file)?.messages)
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // 选中 `~/.cursor` 形态(含 projects/)或直接选中 projects 目录都认
+        let root = if dir.join("projects").is_dir() { dir.join("projects") } else { dir };
+        Box::new(Self { root })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

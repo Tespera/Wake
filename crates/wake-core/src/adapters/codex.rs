@@ -32,6 +32,53 @@ impl CodexAdapter {
     }
 }
 
+/// rollout 存储本体(用户选中的是数据目录而非 codex home):自身不含
+/// sessions/archived 子目录,且顶层有 YYYY 日期目录(sessions 树)**或**
+/// 平铺的 rollout-*.jsonl(archived_sessions 的真实布局,实测平铺)。
+/// with_custom_root 与 normalize_custom_root 共用同一判据
+fn is_rollout_store(dir: &Path) -> bool {
+    !dir.join("sessions").is_dir()
+        && !dir.join("archived_sessions").is_dir()
+        && std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten().any(|e| {
+                    let name = e.file_name();
+                    let Some(n) = name.to_str() else { return false };
+                    (e.path().is_dir() && n.len() == 4 && n.bytes().all(|b| b.is_ascii_digit()))
+                        || (n.starts_with("rollout-") && n.ends_with(".jsonl"))
+                })
+            })
+            .unwrap_or(false)
+}
+
+/// 各家归一化的 codex 实现(mod.rs 静态分派,**不依赖 roster 在场**):
+/// 直选数据目录且父目录呈 home 形态 → 存父目录,state DB 与两个数据根全部
+/// 找回。"数据目录"认两种证据:内容形态(rollout 存储),或目录名本身就是
+/// sessions/archived_sessions——空目录没有内容证据,但表单允许空路径,真实
+/// 的空 sessions 目录同样该上提(2026-08-24 Codex review 两轮)
+pub(crate) fn normalize_custom_root(dir: PathBuf) -> PathBuf {
+    let name = dir.file_name().and_then(|n| n.to_str());
+    let looks_data_dir =
+        is_rollout_store(&dir) || matches!(name, Some("sessions") | Some("archived_sessions"));
+    if looks_data_dir {
+        if let Some(parent) = dir.parent() {
+            // home 证据必须独立于被选目录自身:目录名恰为 sessions 时,
+            // parent/sessions 就是它自己,不能算证据
+            let sibling = match name {
+                Some("sessions") => parent.join("archived_sessions").is_dir(),
+                Some("archived_sessions") => parent.join("sessions").is_dir(),
+                _ => {
+                    parent.join("sessions").is_dir() || parent.join("archived_sessions").is_dir()
+                }
+            };
+            if parent.join("state_5.sqlite").is_file() || sibling {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    dir
+}
+
 #[derive(Debug)]
 struct ThreadRow {
     id: String,
@@ -544,6 +591,27 @@ impl AgentAdapter for CodexAdapter {
             mainline: parsed.messages,
             sidechains: Vec::new(),
             unknown_line_count: parsed.unknown_lines,
+        })
+    }
+
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // dir 视作 CODEX_HOME 形态;归一化未上提的孤立数据目录按**目录名**
+        // 保留角色:空的独立 sessions 目录日后落盘的 rollout 要能被发现,
+        // 独立 archived 拷贝的会话必须保住 archived 标记(build_meta 按
+        // archived_dir 前缀判);无名可依的裸 rollout 拷贝当活跃 sessions。
+        // 侧档一并相对 dir 派生,绝不越界摸父目录——"父目录有 home 证据"的
+        // 场景由 normalize_custom_root 在入库前上提(2026-08-24 Codex review)
+        let name = dir.file_name().and_then(|n| n.to_str());
+        let (sessions_dir, archived_dir) = match name {
+            Some("archived_sessions") => (dir.join("sessions"), dir.clone()),
+            Some("sessions") => (dir.clone(), dir.join("archived_sessions")),
+            _ if is_rollout_store(&dir) => (dir.clone(), dir.join("archived_sessions")),
+            _ => (dir.join("sessions"), dir.join("archived_sessions")),
+        };
+        Box::new(Self {
+            sessions_dir,
+            archived_dir,
+            state_db: dir.join("state_5.sqlite"),
         })
     }
 

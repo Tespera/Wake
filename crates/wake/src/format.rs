@@ -46,26 +46,41 @@ pub fn fmt_tokens(n: Option<i64>) -> String {
     }
 }
 
-/// 绝对路径 → `~/…` 形式,**不折叠中段**。数据源面板要如实给出完整路径
-/// (display_file_path 那种 `~/a/…/file` 的折叠在那里会把信息吃掉)
-pub fn tilde_path(p: &str) -> String {
-    // HOME 进程内不变,缓存住:display_file_path 经由本函数落在详情页
-    // header 上,那是每帧都跑的路径
+/// 进程内不变的 HOME,缓存住:折叠(tilde_path 经 display_file_path 落在
+/// 详情页 header,每帧都跑)与手输展开(expand_tilde)共用同一份
+fn cached_home() -> Option<&'static str> {
     static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let home = HOME.get_or_init(|| {
+    HOME.get_or_init(|| {
         dirs::home_dir()
             .map(|h| h.to_string_lossy().to_string())
             .filter(|h| !h.is_empty())
-    });
+    })
+    .as_deref()
+}
+
+/// 绝对路径 → `~/…` 形式,**不折叠中段**。数据源面板要如实给出完整路径
+/// (display_file_path 那种 `~/a/…/file` 的折叠在那里会把信息吃掉)
+pub fn tilde_path(p: &str) -> String {
     // 边界必须落在分隔符上:裸 starts_with 会把 HOME 的同名前缀兄弟目录
     // 也折叠掉(HOME=/Users/al 时 /Users/al-data → "~-data",一个并不存在
     // 的 HOME 相对路径)。自定义 CODEX_HOME / XDG_DATA_HOME 让这种根变得可能
-    match home {
-        Some(h) => match p.strip_prefix(h.as_str()) {
+    match cached_home() {
+        Some(h) => match p.strip_prefix(h) {
             Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
             _ => p.to_string(),
         },
         None => p.to_string(),
+    }
+}
+
+/// 手输路径的 `~` 前缀展开(tilde_path 的逆;仅前缀,边界同样落在分隔符上)
+pub fn expand_tilde(p: &str) -> String {
+    match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => match cached_home() {
+            Some(h) => format!("{h}{rest}"),
+            None => p.to_string(),
+        },
+        _ => p.to_string(),
     }
 }
 

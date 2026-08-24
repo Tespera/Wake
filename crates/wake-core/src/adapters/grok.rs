@@ -347,6 +347,11 @@ impl AgentAdapter for GrokAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        let root = if dir.join("sessions").is_dir() { dir.join("sessions") } else { dir };
+        Box::new(Self { root })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.root.clone()]
     }

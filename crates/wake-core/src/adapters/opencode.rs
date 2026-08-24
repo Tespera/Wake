@@ -461,6 +461,23 @@ impl AgentAdapter for OpencodeAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // 选中 XDG 数据根(含 opencode/)、opencode 目录本身,或直接给到
+        // 库文件路径都认(Codex review:预设行编辑值曾把文件当目录拼)
+        let nested = dir.join("opencode").join("opencode.db");
+        let db = if dir.is_file() {
+            dir
+        } else if nested.is_file() {
+            nested
+        } else {
+            dir.join("opencode.db")
+        };
+        Box::new(Self {
+            db,
+            rows_cache: MtimeCache::new(),
+        })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.db.clone()]
     }

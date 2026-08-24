@@ -205,6 +205,23 @@ impl AgentAdapter for AntigravityAdapter {
         })
     }
 
+    fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
+        // 选中 `~/.gemini` 形态(含 antigravity-cli/)、库所在目录,或直接
+        // 给到库文件路径都认(Codex review)
+        let nested = dir.join("antigravity-cli").join("conversation_summaries.db");
+        let db = if dir.is_file() {
+            dir
+        } else if nested.is_file() {
+            nested
+        } else {
+            dir.join("conversation_summaries.db")
+        };
+        Box::new(Self {
+            db,
+            rows_cache: MtimeCache::new(),
+        })
+    }
+
     fn data_roots(&self) -> Vec<PathBuf> {
         vec![self.db.clone()]
     }
