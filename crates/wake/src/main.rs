@@ -1,3 +1,8 @@
+// release 挂 windows 子系统:双击启动不带控制台黑窗。debug 保留控制台,
+// eprintln 的诊断日志还有处落;GUI 子系统下致命错误走 MessageBox
+//(wake-core 的 show_fatal_alert),不依赖 stderr。
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 mod assets;
 mod format;
 mod theme;
@@ -53,8 +58,10 @@ fn main() {
 
         let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
         // macOS:隐藏系统标题栏、内容顶到窗顶,traffic light 悬浮在侧栏上;
-        // Linux:标准服务端装饰(appears_transparent 仅 macOS/Windows 生效;
-        // GNOME Wayland 不给 SSD 时暂无标题栏,已知限制,实机验收后再定 CSD)。
+        // Linux/Windows:标准系统标题栏(appears_transparent=false)。Windows
+        // 后端按此保留原生 caption(min/max/close、snap layouts、深色模式随
+        // 系统由 gpui 设 DWMWA_USE_IMMERSIVE_DARK_MODE),title 即窗名;
+        // GNOME Wayland 不给 SSD 时回落 CSD,见 window_decorations 注释。
         // cfg! 而非 #[cfg]:两支在任一平台都参与类型检查,别让另一支只有 CI 见得到
         let titlebar = if cfg!(target_os = "macos") {
             TitlebarOptions {
@@ -82,7 +89,8 @@ fn main() {
                 // workbench 又按 Server 不挂 TitleBar,彻底没有关窗/拖拽面。
                 // 请求 Client 后:Wayland 全家走 CSD(TitleBar 补位),X11 侧
                 // gpui 探测 compositor 不支持 CSD 时仍自动回报 Server(WM 标题
-                // 栏照常、TitleBar 不挂),macOS 忽略此字段
+                // 栏照常、TitleBar 不挂),macOS/Windows 忽略此字段(Windows
+                // 后端不实现 request_decorations,runtime 恒报 Server)
                 window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
             },

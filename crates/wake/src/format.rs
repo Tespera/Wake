@@ -63,23 +63,29 @@ fn cached_home() -> Option<&'static str> {
 pub fn tilde_path(p: &str) -> String {
     // 边界必须落在分隔符上:裸 starts_with 会把 HOME 的同名前缀兄弟目录
     // 也折叠掉(HOME=/Users/al 时 /Users/al-data → "~-data",一个并不存在
-    // 的 HOME 相对路径)。自定义 CODEX_HOME / XDG_DATA_HOME 让这种根变得可能
+    // 的 HOME 相对路径)。自定义 CODEX_HOME / XDG_DATA_HOME 让这种根变得可能。
+    // 分隔符判定走 std::path::is_separator:Windows 上 `\` 与 `/` 都算
     match cached_home() {
         Some(h) => match p.strip_prefix(h) {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+            Some(rest) if rest.is_empty() || rest.starts_with(std::path::is_separator) => {
+                format!("~{rest}")
+            }
             _ => p.to_string(),
         },
         None => p.to_string(),
     }
 }
 
-/// 手输路径的 `~` 前缀展开(tilde_path 的逆;仅前缀,边界同样落在分隔符上)
+/// 手输路径的 `~` 前缀展开(tilde_path 的逆;仅前缀,边界同样落在分隔符上
+/// ——Windows 用户手输 `~\foo` 同样认)
 pub fn expand_tilde(p: &str) -> String {
     match p.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => match cached_home() {
-            Some(h) => format!("{h}{rest}"),
-            None => p.to_string(),
-        },
+        Some(rest) if rest.is_empty() || rest.starts_with(std::path::is_separator) => {
+            match cached_home() {
+                Some(h) => format!("{h}{rest}"),
+                None => p.to_string(),
+            }
+        }
         _ => p.to_string(),
     }
 }
@@ -95,11 +101,13 @@ pub fn display_file_path(path: &str) -> String {
         .map(|(db, _)| db)
         .unwrap_or(path);
     let tilde = tilde_path(p);
-    let parts: Vec<&str> = tilde.split('/').collect();
+    let parts: Vec<&str> = tilde.split(std::path::is_separator).collect();
     match (parts.first(), parts.get(1), parts.last()) {
-        // 超过 根/次级/…/文件 四段的深路径折叠中段
+        // 超过 根/次级/…/文件 四段的深路径折叠中段(重拼用本平台主分隔符,
+        // Windows 展示 `~\a\…\file` 与系统一致)
         (Some(root), Some(second), Some(file)) if parts.len() > 4 => {
-            format!("{root}/{second}/…/{file}")
+            let s = std::path::MAIN_SEPARATOR;
+            format!("{root}{s}{second}{s}…{s}{file}")
         }
         _ => tilde,
     }

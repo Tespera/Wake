@@ -1262,12 +1262,16 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> bool {
         let expanded = expand_tilde(raw_text.trim());
-        let path = if expanded.len() > 1 {
-            expanded.trim_end_matches('/').to_string()
+        // 尾分隔符归一(展示与重叠判定都吃这份);裸根("/"、"C:\")剪完会
+        // 失去绝对性,原样保留。is_absolute 三端同判据——starts_with('/')
+        // 会把所有 Windows 盘符路径误拒
+        let trimmed = expanded.trim_end_matches(std::path::is_separator);
+        let path = if std::path::Path::new(trimmed).is_absolute() {
+            trimmed.to_string()
         } else {
             expanded
         };
-        if path.is_empty() || !path.starts_with('/') {
+        if path.is_empty() || !std::path::Path::new(&path).is_absolute() {
             window.push_notification(Notification::warning("Enter an absolute folder path"), cx);
             return false;
         }
@@ -2123,11 +2127,13 @@ impl Workbench {
             None
         };
 
-        // macOS 恒挂 TitleBar(traffic light 占位 + 拖拽区);Linux 按运行时装饰
-        // 状态:系统给了标题栏(Server)就不挂——TitleBar 的 Linux 实现无条件画
-        // min/max/close 三按钮,会与系统标题栏成双套控制;系统不给(GNOME
-        // Wayland 无 SSD 回落 Client)才挂,此时它是唯一的拖拽区与窗口按钮
-        // (按钮图标 window-*.svg 在 assets 注册表,缺了就是隐形热区)
+        // macOS 恒挂 TitleBar(traffic light 占位 + 拖拽区);Linux/Windows 按
+        // 运行时装饰状态:系统给了标题栏(Server)就不挂——TitleBar 的非 mac
+        // 实现无条件画 min/max/close 三按钮,会与系统标题栏成双套控制;系统
+        // 不给(GNOME Wayland 无 SSD 回落 Client)才挂,此时它是唯一的拖拽区
+        // 与窗口按钮(按钮图标 window-*.svg 在 assets 注册表,缺了就是隐形
+        // 热区)。Windows 走 appears_transparent=false 的原生 caption,装饰
+        // 恒报 Server,这里天然不挂。
         let show_titlebar = cfg!(target_os = "macos")
             || matches!(window.window_decorations(), Decorations::Client { .. });
         v_flex()

@@ -25,14 +25,25 @@ pub const FONT_MSG_BODY: Pixels = px(13.);
 pub const FONT_MSG_THINKING: Pixels = px(11.5);
 
 // ---------------- 平台文案 ----------------
-// 同一处 UI 在不同平台叫不同名字/键(Finder vs 文件管理器、⌘ vs Ctrl),
-// 文案引用这里的常量,别在 render 里散落字面量。cfg! 表达式让两支在任一
-// 平台都过类型检查(名词与 wake-core terminal 的平台实现对应:macos=Finder)。
+// 同一处 UI 在不同平台叫不同名字/键(Finder vs File Explorer vs 文件管理器、
+// ⌘ vs Ctrl),文案引用这里的常量,别在 render 里散落字面量。cfg! 表达式让
+// 各支在任一平台都过类型检查(名词与 wake-core terminal 的平台实现对应:
+// macos=Finder,windows=资源管理器官方英文名 File Explorer)。
 
-pub const SHOW_IN_FM: &str =
-    if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Manager" };
-pub const REVEAL_IN_FM: &str =
-    if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Reveal in File Manager" };
+pub const SHOW_IN_FM: &str = if cfg!(target_os = "macos") {
+    "Show in Finder"
+} else if cfg!(target_os = "windows") {
+    "Show in File Explorer"
+} else {
+    "Show in File Manager"
+};
+pub const REVEAL_IN_FM: &str = if cfg!(target_os = "macos") {
+    "Reveal in Finder"
+} else if cfg!(target_os = "windows") {
+    "Reveal in File Explorer"
+} else {
+    "Reveal in File Manager"
+};
 
 /// ⌘K 面板的唯一绑定串——main.rs 的 bind_keys 与下方徽标同源,改键只动这里
 pub const SEARCH_KEYSTROKE: &str = "secondary-k";

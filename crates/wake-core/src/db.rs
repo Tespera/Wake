@@ -832,8 +832,9 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 索引库路径:~/Library/Application Support/wake/wake.db
-/// (从旧 vibex 路径一次性迁移,保留收藏等 user_data)
+/// 索引库路径:<dirs::data_dir>/wake/wake.db —— macOS 为
+/// ~/Library/Application Support,Linux 为 ~/.local/share,Windows 为
+/// %APPDATA%(从旧 vibex 路径一次性迁移,保留收藏等 user_data)
 pub fn default_db_path() -> std::path::PathBuf {
     let data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let dir = data.join("wake");
