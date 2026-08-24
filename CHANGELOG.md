@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.4] — 2026-08-24
+
+- New: Session locations is now a full manager — every location, built-in or custom, can be edited, removed, or pointed at a different folder
+- New: add custom session folders for any agent, like backups, synced copies, or non-standard installs
+- New: Restore defaults brings all locations back to the built-in paths in one click
+- Update: location rows open an edit form on click, with an agent picker and a folder browser
+- Update: refined spacing, dialog styling and button alignment across the app
+- Fix: the delete confirmation now shows real buttons — before, it could only be confirmed with the Enter key
+- Fix: a session that exists in two locations no longer flips between copies; the newest copy wins
+- Fix: deleted sessions stay deleted even when another location holds a copy of them
+- Fix: sessions from a removed location leave the list right away
+
 ## [0.2.3] — 2026-08-24
 
 - New: Session locations — a sidebar button listing every folder Wake reads, with per-location session counts; click a row to open it in Finder
