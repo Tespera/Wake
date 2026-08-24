@@ -51,3 +51,13 @@ pub fn open_sqlite_ro(db: &Path, tag: &str) -> Option<SqliteRo> {
 pub fn virtual_path(db: &Path, id: &str) -> String {
     format!("{}#{id}", db.display())
 }
+
+/// virtual_path 的逆:磁盘上不存在的路径剥掉 `#<id>` 还原库文件本体,
+/// 真实存在的路径原样返回(文件管理器 reveal 用)。格式知识只在本文件。
+pub fn strip_virtual_path(path: &str) -> &str {
+    if Path::new(path).exists() {
+        path
+    } else {
+        path.rsplit_once('#').map(|(db, _)| db).unwrap_or(path)
+    }
+}

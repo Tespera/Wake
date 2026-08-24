@@ -57,6 +57,12 @@ brands!(
 );
 
 icons!(
+    // gpui-component TitleBar 的 Linux 窗口控制按钮(IconName::Window* 按这
+    // 四个路径取图;缺了按钮就渲染成隐形热区——2026-08-24 Codex review)
+    "window-minimize",
+    "window-maximize",
+    "window-restore",
+    "window-close",
     "star",
     "pin",
     "download",

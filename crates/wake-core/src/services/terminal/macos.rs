@@ -1,123 +1,18 @@
+//! macOS 平台原语:AppleScript/`open` 驱动的终端与 Finder、Finder 废纸篓、
+//! Kooky 深链。接口与 linux.rs 同形,策略(dir/file 分发、路径过滤、
+//! 线程化)在 mod.rs,这里只做动作本身。
+
+use super::{
+    percent_encode, pipe_to, posix_quote, resolve_cli, resume_args, session_bin, spawn_and_reap,
+    ResumeOutcome,
+};
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
-
-#[derive(Debug, Clone)]
-pub struct ResumeOutcome {
-    pub ok: bool,
-    pub command: String,
-    pub error: Option<String>,
-}
-
-/// GUI 进程 PATH 不含 ~/.local/bin 等,经 login shell 批量解析并缓存
-static CLI_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
-
-fn resolve_clis(bins: &[&str]) -> HashMap<String, Option<String>> {
-    let mut cache = CLI_CACHE.lock().unwrap();
-    let map = cache.get_or_insert_with(HashMap::new);
-    let missing: Vec<&str> = bins.iter().filter(|b| !map.contains_key(**b)).copied().collect();
-    if !missing.is_empty() {
-        let script = missing
-            .iter()
-            .map(|b| format!("printf '%s\\t' {b}; command -v {b} || echo"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        let out = Command::new("/bin/zsh").args(["-lic", &script]).output();
-        let stdout = out
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-        let mut found: HashMap<&str, String> = HashMap::new();
-        for line in stdout.lines() {
-            if let Some((name, path)) = line.split_once('\t') {
-                if path.starts_with('/') {
-                    found.insert(name.trim(), path.trim().to_string());
-                }
-            }
-        }
-        for b in missing {
-            map.insert(b.to_string(), found.get(b).cloned());
-        }
-    }
-    bins.iter()
-        .map(|b| (b.to_string(), map.get(*b).cloned().flatten()))
-        .collect()
-}
-
-pub fn cli_path(agent: AgentId) -> Option<String> {
-    let bin = agent_bin(agent)?;
-    resolve_clis(&[bin]).get(bin).cloned().flatten()
-}
-
-/// 会话级二进制:OpenCode v2 beta 与 v1 并存、装为 `opencode2`,
-/// v2 会话(source = "opencode2")必须由它恢复,其余会话走 agent 默认 bin
-fn session_bin(meta: &SessionMeta) -> Option<&'static str> {
-    if meta.agent == AgentId::Opencode && meta.source.as_deref() == Some("opencode2") {
-        Some("opencode2")
-    } else {
-        agent_bin(meta.agent)
-    }
-}
-
-pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
-    match agent {
-        AgentId::ClaudeCode => Some("claude"),
-        AgentId::Codex => Some("codex"),
-        AgentId::Copilot => Some("copilot"),
-        AgentId::Cursor => Some("cursor-agent"),
-        AgentId::Opencode => Some("opencode"),
-        AgentId::Kiro => Some("kiro"),
-        AgentId::Gemini => Some("gemini"),
-        AgentId::Pi => Some("pi"),
-        AgentId::Omp => Some("omp"),
-        AgentId::Grok => Some("grok"),
-        AgentId::Kimi => Some("kimi"),
-        AgentId::Antigravity => Some("agy"),
-        // dsh 官方唯一分发形态是 npx(README 只有 `npx @deepseek-ai/dsh web`,
-        // 不发全局命令);包名由 resume_args 作首参带上
-        AgentId::Dsh => Some("npx"),
-    }
-}
-
-fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
-    match agent {
-        AgentId::ClaudeCode => Some((vec!["--resume".into(), id.into()], true)),
-        AgentId::Codex => Some((vec!["resume".into(), id.into()], false)),
-        AgentId::Copilot => Some((vec![format!("--resume={id}")], false)),
-        AgentId::Cursor => Some((vec!["--resume".into(), id.into()], false)),
-        // 参数形制与 kooky 的 resume 集成一致(空格/等号是各家 CLI 实测约束)
-        // OpenCode 两代 CLI 同为 --session;v2 会话由 session_bin 换 opencode2
-        AgentId::Opencode => Some((vec!["--session".into(), id.into()], false)),
-        AgentId::Pi => Some((vec!["--session".into(), id.into()], false)),
-        AgentId::Omp => Some((vec!["--resume".into(), id.into()], false)),
-        AgentId::Grok => Some((vec!["--resume".into(), id.into()], false)),
-        AgentId::Kimi => Some((vec!["--session".into(), id.into()], false)),
-        AgentId::Antigravity => Some((vec![format!("--conversation={id}")], false)),
-        // dsh 官方 tui bundle 未发布(rc.8 shipped profile 只有 web/headless,
-        // help 里的 --profile tui --resume 当下无消费端),web 是唯一交互
-        // surface 且无 per-session 深链——resume 退而求其次:cd 到会话 cwd
-        // 按官方原样 `npx @deepseek-ai/dsh web` 拉起(workspace 由启动目录
-        // 决定),会话在 UI 里即点即续。官方发布 tui bundle 后切回定点 resume
-        AgentId::Dsh => Some((vec!["@deepseek-ai/dsh".into(), "web".into()], true)),
-        _ => None,
-    }
-}
-
-/// POSIX 单引号 quote
-pub fn posix_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:=".contains(c))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
 
 /// AppleScript 双引号字符串转义
-pub fn applescript_quote(s: &str) -> String {
+fn applescript_quote(s: &str) -> String {
     s.replace('\\', r"\\").replace('"', r#"\""#)
 }
 
@@ -189,25 +84,24 @@ impl TerminalApp {
     fn is_installed(&self) -> bool {
         self.resolved_app_path().is_some()
     }
-
-    /// 目标消费什么:shell 命令串,还是会话深链。新增非 shell 目标时
-    /// 在此声明,resume_session_in 无需再加旁路。
-    fn launch_mode(&self) -> Launch {
-        match self {
-            TerminalApp::Terminal => Launch::Shell(launch_terminal_app),
-            TerminalApp::ITerm => Launch::Shell(launch_iterm),
-            TerminalApp::Warp => Launch::Shell(launch_warp),
-            TerminalApp::Ghostty => Launch::Shell(launch_ghostty),
-            TerminalApp::Kooky => Launch::DeepLink,
-        }
-    }
 }
 
-enum Launch {
-    /// 在该终端里执行拼好的 shell 命令
-    Shell(fn(&str) -> anyhow::Result<()>),
-    /// 走会话深链(kooky://),不经过 agent CLI
-    DeepLink,
+/// 深链类目标整锅接管 resume(不经 agent CLI)。Kooky 是本平台唯一一例;
+/// 新增非 shell 目标在此声明,mod.rs 的 resume_session_in 无需加旁路。
+pub(super) fn deep_link_resume(meta: &SessionMeta, term: TerminalApp) -> Option<ResumeOutcome> {
+    (term == TerminalApp::Kooky).then(|| launch_kooky(meta))
+}
+
+/// Shell 类目标的命令注入分发(深链目标已被 deep_link_resume 拦下,
+/// Kooky 臂只是护栏)
+pub(super) fn launch_shell(term: TerminalApp, command: &str) -> anyhow::Result<()> {
+    match term {
+        TerminalApp::Terminal => launch_terminal_app(command),
+        TerminalApp::ITerm => launch_iterm(command),
+        TerminalApp::Warp => launch_warp(command),
+        TerminalApp::Ghostty => launch_ghostty(command),
+        TerminalApp::Kooky => anyhow::bail!("Kooky is a deep-link target"),
+    }
 }
 
 /// 确保已装终端的应用图标提取到 `cache_dir/<id>.png`(64px),返回 id → 路径。
@@ -392,28 +286,8 @@ fn launch_warp(command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn copy_to_clipboard(text: &str) {
-    use std::io::Write;
-    if let Ok(mut child) = Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
-        if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(text.as_bytes());
-        }
-        let _ = child.wait();
-    }
-}
-
-/// query 值的保守 percent-encode(unreserved 之外全编)
-fn percent_encode_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+pub(super) fn copy_to_clipboard(text: &str) -> bool {
+    pipe_to("pbcopy", &[], text)
 }
 
 /// KOOKY_ROSTER 之外的 agent 在 kooky 里点名会被拒——改走 kooky-cli 的哑管道:
@@ -430,7 +304,7 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
     // agent CLI 走与真终端路径同一次解析(GUI 进程 PATH 不全,过 login shell),
     // 顺带承担"装没装"的判断:少了这步,kooky 会开出一个只写着 command not
     // found 的 tab,而 Wake 这边照报成功
-    let Some(exe) = resolve_clis(&[bin]).get(bin).cloned().flatten() else {
+    let Some(exe) = resolve_cli(bin) else {
         return fail(String::new(), format!("Command {bin} not found — is it installed?"));
     };
     let cmd = std::iter::once(exe.as_str())
@@ -447,8 +321,7 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
         cmd.clone()
     };
     let bail = |reason: String| {
-        copy_to_clipboard(&manual);
-        fail(shown.clone(), format!("{reason} — command copied, run it manually"))
+        fail(shown.clone(), format!("{reason}. {}", super::clipboard_fallback(&manual)))
     };
     // 项目挪走了 kooky 的 --cwd 就没法落地。走同一条兜底,别让 Kooky 目标
     // 比 Terminal 少一份可手动执行的命令
@@ -482,7 +355,7 @@ fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
         let mut url = format!("kooky://resume?agent={}&id={}", meta.agent.as_str(), meta.id);
         if !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir() {
             url.push_str("&cwd=");
-            url.push_str(&percent_encode_query(&meta.project_path));
+            url.push_str(&percent_encode(&meta.project_path, false));
         }
         let deep_ok = Command::new("open")
             .arg(&url)
@@ -505,73 +378,10 @@ fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
     }
 }
 
-pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome {
-    // 深链目标不走 shell 命令构建(不依赖 agent CLI)
-    let Launch::Shell(run) = term.launch_mode() else {
-        return launch_kooky(meta);
-    };
-    let Some((args, requires_cwd)) = resume_args(meta.agent, &meta.id) else {
-        return ResumeOutcome {
-            ok: false,
-            command: String::new(),
-            error: Some(format!("Resume isn't supported for {} yet", meta.agent.display_name())),
-        };
-    };
-    let bin = session_bin(meta);
-    let Some(cli) = bin.and_then(|b| resolve_clis(&[b]).get(b).cloned().flatten()) else {
-        return ResumeOutcome {
-            ok: false,
-            command: String::new(),
-            error: Some(format!(
-                "Command {} not found — is it installed?",
-                bin.unwrap_or("?")
-            )),
-        };
-    };
-    let cwd_ok = !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir();
-    let core = std::iter::once(cli.as_str())
-        .chain(args.iter().map(|s| s.as_str()))
-        .map(posix_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let command = if cwd_ok {
-        format!("cd {} && {core}", posix_quote(&meta.project_path))
-    } else {
-        core
-    };
-    if requires_cwd && !cwd_ok {
-        copy_to_clipboard(&command);
-        return ResumeOutcome {
-            ok: false,
-            command,
-            error: Some(format!("Project directory no longer exists: {} (command copied — run it manually)", meta.project_path)),
-        };
-    }
-
-    let result = run(&command);
-    match result {
-        Ok(()) => ResumeOutcome {
-            ok: true,
-            command,
-            error: None,
-        },
-        Err(e) => {
-            copy_to_clipboard(&command);
-            ResumeOutcome {
-                ok: false,
-                command,
-                error: Some(format!("Couldn't open terminal ({e}). Command copied to clipboard — paste to run.")),
-            }
-        }
-    }
-}
-
-/// 删除会话文件到废纸篓(macOS 用 Finder,可从废纸篓恢复)
-pub fn trash_paths(paths: &[String]) -> anyhow::Result<()> {
+/// 逐文件让 Finder 删进废纸篓(osascript 首次触发自动化授权会停等用户
+/// 点选,可能长阻塞;首错即断,已删的留在废纸篓可恢复)
+pub(super) fn trash_existing(paths: &[&str]) -> anyhow::Result<()> {
     for p in paths {
-        if !Path::new(p).exists() {
-            continue;
-        }
         let esc = applescript_quote(p);
         let out = osascript(&[format!(
             "tell application \"Finder\" to delete (POSIX file \"{esc}\" as alias)"
@@ -583,10 +393,8 @@ pub fn trash_paths(paths: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 致命错误提示。GPUI 窗口还没起来时这是唯一能让用户看见的通道,
-/// 否则应用就是无提示秒退。换行先压平——AppleScript 字符串字面量不能跨行。
-pub fn show_fatal_alert(message: &str) {
-    eprintln!("[wake] fatal: {message}");
+/// 致命错误对话框。换行先压平——AppleScript 字符串字面量不能跨行。
+pub(super) fn alert_dialog(message: &str) {
     let flat = message.replace(['\n', '\r'], " ");
     let _ = osascript(&[format!(
         "display alert \"Wake can't start\" message \"{}\" as critical",
@@ -594,38 +402,16 @@ pub fn show_fatal_alert(message: &str) {
     )]);
 }
 
-/// 起 Finder 子进程并**收尸**。两头都不能选:`status()` 把 UI 线程阻塞到
-/// LaunchServices 往返结束(Finder 冷启上百毫秒);裸 `spawn()` 丢掉 Child 则
-/// 留僵尸——Unix 上 Child 的 Drop 不 wait,实测点几次就攒几个 `<defunct>`,
-/// 直到 Wake 退出才回收。故 spawn 后交给一个短命线程 wait
-fn spawn_and_reap(mut cmd: Command) {
-    if let Ok(mut child) = cmd.spawn() {
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
-}
-
-/// 在 Finder 里打开这个位置:目录直接进入,文件则退回在父目录中选中它
-/// ——SQLite 型的数据源是库文件,直接 open 会把它丢给默认应用打开
-pub fn open_in_finder(path: &str) {
-    if Path::new(path).is_dir() {
-        let mut cmd = Command::new("open");
-        cmd.arg(path);
-        spawn_and_reap(cmd);
-    } else {
-        reveal_in_finder(path);
-    }
-}
-
-pub fn reveal_in_finder(path: &str) {
-    // SQLite 型会话是 <db>#<id> 虚拟路径,磁盘上不存在——reveal 库文件本体
-    let p = if Path::new(path).exists() {
-        path
-    } else {
-        path.rsplit_once('#').map(|(db, _)| db).unwrap_or(path)
-    };
+/// 在 Finder 里进入目录
+pub(super) fn open_dir(path: &str) {
     let mut cmd = Command::new("open");
-    cmd.args(["-R", p]);
-    spawn_and_reap(cmd);
+    cmd.arg(path);
+    let _ = spawn_and_reap(cmd);
+}
+
+/// 在 Finder 里选中文件(收 mod.rs 已剥好虚拟后缀的真实路径)
+pub(super) fn reveal_path(path: &str) {
+    let mut cmd = Command::new("open");
+    cmd.args(["-R", path]);
+    let _ = spawn_and_reap(cmd);
 }

@@ -2,12 +2,12 @@
 
 [![License](https://img.shields.io/github/license/iAmCorey/Wake?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-007AFF?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20Linux%20beta-007AFF?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/iAmCorey/Wake/total?style=flat-square)](https://github.com/iAmCorey/Wake/releases)
 [![Stars](https://img.shields.io/github/stars/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/stargazers)
 [![CI](https://img.shields.io/github/actions/workflow/status/iAmCorey/Wake/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml)
 
-A native macOS app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5).
+A native desktop app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5). macOS first; experimental Linux support since v0.2.5.
 
 Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
@@ -68,6 +68,19 @@ open dist/Wake.app
 ```
 
 The app is ad-hoc signed, so if you download a prebuilt copy instead of building it yourself, macOS Gatekeeper will block the first launch — right-click the app and choose *Open*, or run `xattr -d com.apple.quarantine Wake.app`.
+
+### Linux (experimental)
+
+Prebuilt arm64 packages are attached to each release: a `.deb`, and a tar.gz with a user-level `install.sh` (no root needed). Or build from source:
+
+```bash
+sudo apt-get install -y libasound2-dev libfontconfig1-dev libwayland-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev libssl-dev libzstd-dev pkg-config cmake clang
+git clone https://github.com/iAmCorey/Wake && cd Wake
+scripts/make-linux.sh        # builds dist/wake-<version>-linux-<arch>.tar.gz and .deb
+```
+
+The data layer, rendering and search are fully tested on Linux; terminal-resume targets and desktop integration have seen less real-desktop mileage yet — issues welcome.
 
 ## Development
 

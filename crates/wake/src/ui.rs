@@ -24,6 +24,30 @@ pub const FONT_MSG_BODY: Pixels = px(13.);
 /// thinking 摘要行(斜体)
 pub const FONT_MSG_THINKING: Pixels = px(11.5);
 
+// ---------------- 平台文案 ----------------
+// 同一处 UI 在不同平台叫不同名字/键(Finder vs 文件管理器、⌘ vs Ctrl),
+// 文案引用这里的常量,别在 render 里散落字面量。cfg! 表达式让两支在任一
+// 平台都过类型检查(名词与 wake-core terminal 的平台实现对应:macos=Finder)。
+
+pub const SHOW_IN_FM: &str =
+    if cfg!(target_os = "macos") { "Show in Finder" } else { "Show in File Manager" };
+pub const REVEAL_IN_FM: &str =
+    if cfg!(target_os = "macos") { "Reveal in Finder" } else { "Reveal in File Manager" };
+
+/// ⌘K 面板的唯一绑定串——main.rs 的 bind_keys 与下方徽标同源,改键只动这里
+pub const SEARCH_KEYSTROKE: &str = "secondary-k";
+
+/// 搜索快捷键徽标,从真实绑定串派生("⌘K"/"Ctrl+K"——secondary→平台键
+/// 与显示形制都由 gpui/Kbd 持有,这里零平台知识)
+pub fn search_key_hint() -> &'static str {
+    use std::sync::OnceLock;
+    static HINT: OnceLock<String> = OnceLock::new();
+    HINT.get_or_init(|| {
+        let key = gpui::Keystroke::parse(SEARCH_KEYSTROKE).expect("SEARCH_KEYSTROKE parses");
+        gpui_component::kbd::Kbd::format(&key)
+    })
+}
+
 // ---------------- 间距与结构 ----------------
 // 间距刻度:4px 网格。新代码一律引用常量或显式 px();
 // 注意 gpui 的 rem 间距类有幽灵值(rem=14px 下 p_2p5=8.75px、p_3=10.5px,

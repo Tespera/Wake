@@ -1186,7 +1186,7 @@ impl Workbench {
                                                 .hover(|s| s.bg(theme.secondary_hover))
                                                 .active(|s| s.bg(theme.secondary_active))
                                                 .on_click(move |_, _, _| {
-                                                    terminal::open_in_finder(&path)
+                                                    terminal::open_in_file_manager(&path)
                                                 })
                                                 .child(
                                                     icon("icons/folder.svg")
@@ -1194,7 +1194,7 @@ impl Workbench {
                                                         .flex_shrink_0()
                                                         .text_color(theme.muted_foreground),
                                                 )
-                                                .child("Show in Finder"),
+                                                .child(SHOW_IN_FM),
                                         )
                                     }),
                             )
@@ -1965,8 +1965,8 @@ impl Workbench {
         });
     }
 
-    /// 执行删除:文件进废纸篓 + 自库 tombstone。trash_paths 走 osascript 驱动
-    /// Finder,首次触发自动化授权时会一直停着等用户点选——必须离开 UI 线程,
+    /// 执行删除:文件进废纸篓 + 自库 tombstone。trash_paths 可能长阻塞
+    /// (契约见 terminal/mod.rs,平台缘由见各实现 doc)——必须离开 UI 线程,
     /// 否则界面在授权框弹出的整段时间里完全冻结。
     fn do_delete(
         &mut self,
@@ -2084,7 +2084,7 @@ impl Workbench {
 
     // ---------- 渲染 ----------
 
-    fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_sidebar(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let all_active = self.selected_agent.is_none()
             && self.selected_project.is_none()
@@ -2123,13 +2123,20 @@ impl Workbench {
             None
         };
 
+        // macOS 恒挂 TitleBar(traffic light 占位 + 拖拽区);Linux 按运行时装饰
+        // 状态:系统给了标题栏(Server)就不挂——TitleBar 的 Linux 实现无条件画
+        // min/max/close 三按钮,会与系统标题栏成双套控制;系统不给(GNOME
+        // Wayland 无 SSD 回落 Client)才挂,此时它是唯一的拖拽区与窗口按钮
+        // (按钮图标 window-*.svg 在 assets 注册表,缺了就是隐形热区)
+        let show_titlebar = cfg!(target_os = "macos")
+            || matches!(window.window_decorations(), Decorations::Client { .. });
         v_flex()
             .w(px(224.))
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
             // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token,不再叠加覆写
-            .child(TitleBar::new())
+            .when(show_titlebar, |this| this.child(TitleBar::new()))
             .child(
                 div()
                     .flex_shrink_0()
@@ -2188,7 +2195,7 @@ impl Workbench {
                                     div()
                                         .flex_shrink_0()
                                         .text_size(FONT_LABEL)
-                                        .child("⌘K"),
+                                        .child(search_key_hint()),
                                 ),
                         )
                 ),
@@ -2622,7 +2629,7 @@ impl Workbench {
                             px(58.),
                             px(26.),
                             "No session selected",
-                            "Pick one from the list, or press ⌘K to search.",
+                            format!("Pick one from the list, or press {} to search.", search_key_hint()),
                             cx,
                         )),
                 )
@@ -2652,12 +2659,12 @@ impl Workbench {
                             }),
                     )
                     .item(
-                        PopupMenuItem::new(" Reveal in Finder")
+                        PopupMenuItem::new(format!(" {REVEAL_IN_FM}"))
                             .icon(icon("icons/folder.svg").with_size(px(15.)))
                             .on_click(move |_, _, cx| {
                                 reveal_entity.update(cx, |this, _| {
                                     if let Some(detail) = &this.detail {
-                                        terminal::reveal_in_finder(&detail.meta.file_path);
+                                        terminal::reveal_in_file_manager(&detail.meta.file_path);
                                     }
                                 });
                             }),
@@ -2967,7 +2974,7 @@ impl Workbench {
                             .cursor_pointer()
                             .hover(|s| s.text_colored(theme.foreground, FONT_LABEL))
                             .on_click(move |_, _, _| {
-                                terminal::reveal_in_finder(&file_path);
+                                terminal::reveal_in_file_manager(&file_path);
                             })
                             .child(icon("icons/file-text.svg").with_size(px(12.)).flex_shrink_0())
                             .child(div().min_w_0().truncate().child(display_file_path(&meta.file_path)))
@@ -3457,7 +3464,7 @@ impl Render for Workbench {
             .child(
                 h_flex()
                     .size_full()
-                    .child(self.render_sidebar(cx))
+                    .child(self.render_sidebar(window, cx))
                     .child(self.render_session_list(cx))
                     .child(self.render_detail(window, cx)),
             )

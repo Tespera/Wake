@@ -12,7 +12,7 @@ pub mod opencode;
 pub mod pi;
 
 pub(crate) mod parse_utils;
-mod sqlite_ro;
+pub(crate) mod sqlite_ro;
 
 use crate::models::*;
 use anyhow::Result;
