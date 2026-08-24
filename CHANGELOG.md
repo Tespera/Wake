@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3] — 2026-08-24
+
+- New: Session locations — a sidebar button listing every folder Wake reads, with per-location session counts; click a row to open it in Finder
+- New: custom data locations are respected — `CODEX_HOME` for Codex, `XDG_DATA_HOME` for OpenCode
+- Update: the refresh button moved to the sidebar footer
+- Update: sidebar counts are now badges
+- Fix: an agent installed while Wake is running now appears after a refresh, no relaunch needed
+
 ## [0.2.2] — 2026-08-22
 
 - New: DeepSeek Harness (`dsh`) support — 13 agents total, resumable, with its compressed session logs read transparently
