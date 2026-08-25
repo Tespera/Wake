@@ -180,18 +180,21 @@ pub fn create_adapters_for(store: &crate::db::Store) -> Vec<Box<dyn AgentAdapter
     create_adapters_with(&customs, &removed)
 }
 
-/// 数据根是否拥有该会话文件路径。边界必须落在 '/'(目录型)或 '#'(SQLite
+/// 数据根是否拥有该会话文件路径。边界必须落在分隔符(目录型)或 '#'(SQLite
 /// 虚拟路径 `<db>#<id>`)上,与 db 侧 counts_by_path_prefix 同判据——裸前缀
-/// 会把 `…/sessions-old` 记到 `…/sessions` 头上
+/// 会把 `…/sessions-old` 记到 `…/sessions` 头上。分隔符判定走
+/// std::path::is_separator(Windows 上 `\` 与 `/` 都算),POSIX 上行为
+/// 与旧 '/' 字面量逐位相同。
 pub fn path_owns(root: &str, path: &str) -> bool {
-    // 文件系统根:strip_prefix("/") 剥掉的正是分隔符本身,通用分支会把一切
-    // 后代判为界外(2026-08-24 Codex review)
-    if root == "/" {
-        return path.starts_with('/');
+    // 文件系统根("/"、Windows 的 "C:\"):strip_prefix 剥掉的正是分隔符
+    // 本身,通用分支会把一切后代判为界外(2026-08-24 Codex review)。
+    // "根"即无父目录;空串 parent 也是 None,先挡掉,别让空根拥有一切
+    if !root.is_empty() && Path::new(root).parent().is_none() {
+        return path.starts_with(root);
     }
     match path.strip_prefix(root) {
         Some("") => true,
-        Some(rest) => rest.starts_with('/') || rest.starts_with('#'),
+        Some(rest) => rest.starts_with(std::path::is_separator) || rest.starts_with('#'),
         None => false,
     }
 }

@@ -20,8 +20,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 二进制名 Wake.exe 来自 [[bin]](macOS 菜单栏取进程名所需);Windows 惯例
 # 首字母大写正好同形,不再改名
-$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) "wake-stage"
-$stage = Join-Path $stageRoot "wake-$version-windows-$arch"
+$stage = Join-Path ([System.IO.Path]::GetTempPath()) "wake-stage\wake-$version-windows-$arch"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 Copy-Item (Join-Path $targetDir "release/Wake.exe") (Join-Path $stage "Wake.exe")

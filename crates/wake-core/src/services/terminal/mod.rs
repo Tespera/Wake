@@ -3,10 +3,11 @@
 //! 原语(起终端、开目录、选中文件、进废纸篓、弹对话框、写剪贴板),各端
 //! 导出同形接口(TerminalApp 变体集合各异,UI 只遍历不点名)。
 //!
-//! POSIX 双端(macOS/Linux)共享本文件的 login shell 探测与 posix_quote
-//! 拼装;Windows 的三个前提全不成立(无 login shell、引号不是 POSIX 规则、
-//! 命令方言按终端宿主分 cmd/PowerShell 两派),这三件事经 probe_clis /
-//! compose_command / launch_in 三个接缝交回 windows.rs,策略流程本身不分叉。
+//! POSIX 双端(macOS/Linux)的共享层在 posix.rs(login shell 探测、
+//! posix_quote 拼装);Windows 的这些前提全不成立(无 login shell、引号
+//! 不是 POSIX 规则、命令方言按终端宿主分 cmd/PowerShell 两派),故
+//! probe_clis / compose_command / launch_shell 三个接缝按平台各取一份,
+//! 策略流程本身不分叉。
 
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
@@ -24,15 +25,30 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux as platform;
 
+// POSIX 共享层**正向**圈定,新平台不会静默继承(见 posix.rs 头注)。
+// pub(crate) 三件是 macos.rs / linux.rs 经 `super::` 取用的中转。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod posix;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use posix::{compose_command, probe_clis};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use posix::{percent_encode, pipe_to};
+// posix_quote 只有 macos.rs 消费(kooky CLI 的命令拼装),Linux 上中转会空挂
+#[cfg(target_os = "macos")]
+pub(crate) use posix::posix_quote;
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
 use windows as platform;
+#[cfg(target_os = "windows")]
+use windows::{compose_command, probe_clis};
 
-// 公共层默认走 POSIX 假设,新平台进来必须给出自己的模块并重审 probe_clis /
-// compose_command / launch_in 三个接缝(windows.rs 是完整先例),不能静默沿用
+// 新平台必须给出自己的模块并接上 probe_clis / compose_command /
+// launch_shell 三个接缝(windows.rs 是完整先例)——POSIX 共享层是正向
+// cfg,漏接的接缝直接是编译错误,不存在静默沿用
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-compile_error!("wake terminal services: unsupported platform — add a platform module (POSIX assumptions throughout)");
+compile_error!("wake terminal services: unsupported platform — add a platform module wired into the probe_clis / compose_command / launch_shell seams");
 
 pub use platform::{ensure_app_icons, installed_terminals, terminals_for, TerminalApp};
 
@@ -45,48 +61,6 @@ pub struct ResumeOutcome {
 
 /// GUI 进程 PATH 不全(macOS/Linux 缺 ~/.local/bin 等),批量解析并缓存
 static CLI_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
-
-/// 解析 PATH 用的 login shell:macOS 固定 zsh(系统默认);Linux 尊重 $SHELL
-/// (bash/zsh/fish 对 `-lic` 与 `command -v` 语义一致),缺省 /bin/bash
-#[cfg(not(target_os = "windows"))]
-fn login_shell() -> String {
-    if cfg!(target_os = "macos") {
-        return "/bin/zsh".to_string();
-    }
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| s.starts_with('/'))
-        .unwrap_or_else(|| "/bin/bash".to_string())
-}
-
-/// 批量探测缺失 bin 的绝对路径(POSIX:login shell 里 `command -v`,把
-/// 用户 rc 文件加进 PATH 的目录一并覆盖)。Windows 的 GUI 进程 PATH 来自
-/// 注册表、天然完整,探测在 windows.rs 用 PATH×PATHEXT 纯 Rust 遍历。
-#[cfg(not(target_os = "windows"))]
-fn probe_clis(missing: &[&str]) -> HashMap<String, String> {
-    let script = missing
-        .iter()
-        .map(|b| format!("printf '%s\\t' {b}; command -v {b} || echo"))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let out = Command::new(login_shell()).args(["-lic", &script]).output();
-    let stdout = out
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    let mut found = HashMap::new();
-    for line in stdout.lines() {
-        if let Some((name, path)) = line.split_once('\t') {
-            if path.starts_with('/') {
-                found.insert(name.trim().to_string(), path.trim().to_string());
-            }
-        }
-    }
-    found
-}
-
-#[cfg(target_os = "windows")]
-use windows::probe_clis;
 
 fn resolve_clis(bins: &[&str]) -> HashMap<String, Option<String>> {
     let mut cache = CLI_CACHE.lock().unwrap();
@@ -166,82 +140,6 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
     }
 }
 
-/// POSIX 单引号 quote
-#[cfg(not(target_os = "windows"))]
-pub fn posix_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:=".contains(c))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// 展示/剪贴板/启动共用的一条可执行命令。POSIX 双端就是实际启动串;
-/// Windows 版(windows.rs)是 PowerShell 方言的"手动可粘"形态,实际启动
-/// 由 launch_in 按终端宿主重拼。
-#[cfg(not(target_os = "windows"))]
-fn compose_command(cli: &str, args: &[String], cwd: Option<&str>) -> String {
-    let core = std::iter::once(cli)
-        .chain(args.iter().map(|s| s.as_str()))
-        .map(posix_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    match cwd {
-        Some(dir) => format!("cd {} && {core}", posix_quote(dir)),
-        None => core,
-    }
-}
-
-#[cfg(target_os = "windows")]
-use windows::compose_command;
-
-/// 起终端跑恢复命令。POSIX 双端直接投喂拼好的 command;Windows 忽略
-/// command、拿结构化件重拼(cmd 宿主 cmd 方言、其余 PowerShell 方言)——
-/// 一条字符串塞不进两种引号规则,接缝只能开在这里。
-#[cfg(not(target_os = "windows"))]
-fn launch_in(
-    term: TerminalApp,
-    _cli: &str,
-    _args: &[String],
-    _cwd: Option<&str>,
-    command: &str,
-) -> anyhow::Result<()> {
-    platform::launch_shell(term, command)
-}
-
-#[cfg(target_os = "windows")]
-fn launch_in(
-    term: TerminalApp,
-    cli: &str,
-    args: &[String],
-    cwd: Option<&str>,
-    _command: &str,
-) -> anyhow::Result<()> {
-    windows::launch_shell(term, cli, args, cwd)
-}
-
-/// 保守 percent-encode(RFC 3986 unreserved 之外全编;keep_slash 供
-/// file:// URL 保路径分隔)。POSIX 两端共用,编码集只此一份。
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn percent_encode(s: &str, keep_slash: bool) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(b as char)
-            }
-            b'/' if keep_slash => out.push('/'),
-            _ => {
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
-}
-
 pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome {
     // 深链类目标(macOS Kooky)由平台整锅接管,不走 shell 命令构建;
     // 新增非 shell 目标在平台的 deep_link_resume 里声明,这里无需加旁路
@@ -278,7 +176,14 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
         };
     }
 
-    let result = launch_in(term, &cli, &args, cwd, &command);
+    // 起终端:POSIX 直接投喂拼好的 command;Windows 的 launch_shell 另收
+    // 结构化件按宿主重拼方言(cmd 宿主 cmd 方言、其余复用 command 的
+    // PowerShell 形态)——一条字符串塞不进两种引号规则,平台差异只摊在
+    // 这一处调用点上。
+    #[cfg(not(target_os = "windows"))]
+    let result = platform::launch_shell(term, &command);
+    #[cfg(target_os = "windows")]
+    let result = platform::launch_shell(term, &cli, &args, cwd, &command);
     match result {
         Ok(()) => ResumeOutcome {
             ok: true,
@@ -346,24 +251,6 @@ pub fn open_in_file_manager(path: &str) {
 pub fn reveal_in_file_manager(path: &str) {
     let real = crate::adapters::sqlite_ro::strip_virtual_path(path).to_string();
     std::thread::spawn(move || platform::reveal_path(&real));
-}
-
-/// 把 text 经管道写给 `bin args…` 的 stdin(POSIX 剪贴板工具用),按退出码
-/// 报成败——"copied to clipboard" 的用户提示以此为据,不能 spawn 成功就算数。
-/// 三家 Linux 工具与 pbcopy 都在拿到内容后自行 fork 常驻,wait 即刻返回。
-/// Windows 不走子进程管道(clip.exe 按控制台 codepage 解码,非 ASCII 必乱),
-/// windows.rs 直接调 Win32 剪贴板。
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn pipe_to(bin: &str, args: &[&str], text: &str) -> bool {
-    use std::io::Write;
-    let Ok(mut child) = Command::new(bin).args(args).stdin(std::process::Stdio::piped()).spawn()
-    else {
-        return false;
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(text.as_bytes());
-    }
-    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// 起子进程并**收尸**,spawn 失败上抛。`status()` 不能用:把调用线程阻塞

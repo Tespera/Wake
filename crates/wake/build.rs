@@ -5,12 +5,14 @@
 //! (scripts/make-windows.ps1 头注有再生成命令)。
 
 fn main() {
+    // rerun 声明先于 early return:零声明的 build script 会退回"包内任一
+    // 文件变了就重跑",非 Windows 平台的增量构建也白付一次空转
+    println!("cargo:rerun-if-changed=assets/icon.ico");
     // 按编译目标而非宿主判断:交叉构建(如 Linux 上 cargo check windows 目标)
     // 也要走这支;宿主没有 rc/windres 工具链时降级为警告,不挡 check
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    println!("cargo:rerun-if-changed=assets/icon.ico");
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/icon.ico");
     res.set("ProductName", "Wake");

@@ -1264,17 +1264,14 @@ impl Workbench {
         let expanded = expand_tilde(raw_text.trim());
         // 尾分隔符归一(展示与重叠判定都吃这份);裸根("/"、"C:\")剪完会
         // 失去绝对性,原样保留。is_absolute 三端同判据——starts_with('/')
-        // 会把所有 Windows 盘符路径误拒
+        // 会把所有 Windows 盘符路径误拒(空串它也判 false,无需单独挡)
         let trimmed = expanded.trim_end_matches(std::path::is_separator);
-        let path = if std::path::Path::new(trimmed).is_absolute() {
-            trimmed.to_string()
-        } else {
-            expanded
-        };
-        if path.is_empty() || !std::path::Path::new(&path).is_absolute() {
+        let path = if std::path::Path::new(trimmed).is_absolute() { trimmed } else { &expanded };
+        if !std::path::Path::new(path).is_absolute() {
             window.push_notification(Notification::warning("Enter an absolute folder path"), cx);
             return false;
         }
+        let path = path.to_string();
         // 各家归一化(codex:直选 sessions 树/平铺 archived 上提到家层,侧档
         // 找回)。静态分派,不依赖该家实例是否还在 roster(默认被移除时也要
         // 生效);归一化后再做无改动/重叠判定,选中默认根数据子目录会正确判"已覆盖"
@@ -1992,7 +1989,10 @@ impl Workbench {
                     if this.detail.as_ref().is_some_and(|d| d.meta.key == key) {
                         this.detail = None;
                     }
-                    window.push_notification(Notification::success("Session moved to Trash"), cx);
+                    window.push_notification(
+                        Notification::success(format!("Session moved to {TRASH_NOUN}")),
+                        cx,
+                    );
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
                     this.refresh(window, cx);
                 }
@@ -2031,14 +2031,16 @@ impl Workbench {
                 .confirm()
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text("Move to Trash")
+                        .ok_text(format!("Move to {TRASH_NOUN}"))
                         .ok_variant(gpui_component::button::ButtonVariant::Danger),
                 )
                 .child(
                     v_flex()
                         .gap(SPACE_SM)
                         .text_size(FONT_BODY)
-                        .child("The session file will be moved to Trash. You can restore it anytime:")
+                        .child(format!(
+                            "The session file will be moved to {TRASH_NOUN}. You can restore it anytime:"
+                        ))
                         .child(
                             div()
                                 .px(SPACE_SM)
@@ -2687,7 +2689,7 @@ impl Workbench {
                     )
                     .separator()
                     .item(
-                        PopupMenuItem::new(" Move to Trash")
+                        PopupMenuItem::new(format!(" Move to {TRASH_NOUN}"))
                             .icon(icon("icons/trash-2.svg").with_size(px(15.)))
                             .on_click(move |_, window, cx| {
                                 delete_entity.update(cx, |this, cx| {

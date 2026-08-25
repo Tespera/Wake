@@ -10,19 +10,13 @@
 //! 宿主)。展示/剪贴板形态同为 PowerShell 方言:现代 Windows 的默认 shell,
 //! pwsh / Windows PowerShell / wt 默认 profile 粘贴均可跑。
 
-use super::{spawn_and_reap, ResumeOutcome};
+use super::{resolve_cli, resolve_clis, spawn_and_reap, ResumeOutcome};
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// 子进程创建旗标(文档钉死的值,不为两个常量拉 windows-sys feature):
-/// NEW_CONSOLE 给控制台宿主开自己的窗;NO_WINDOW 压掉 console 子系统
-/// launcher(wt.exe / wezterm.exe)从 GUI 进程起动时闪现的空控制台,
-/// 对 GUI 子进程无效果、可安全统一加。
-const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use windows_sys::Win32::System::Threading::{CREATE_NEW_CONSOLE, CREATE_NO_WINDOW};
 
 /// Open In 下拉的目标终端(Windows 家族)。wt/pwsh/powershell/cmd 覆盖
 /// 系统自带面(cmd 与 Windows PowerShell 必装,探测恒真),第三方只列
@@ -85,28 +79,39 @@ impl TerminalApp {
 pub(super) fn probe_clis(missing: &[&str]) -> HashMap<String, String> {
     let mut found = HashMap::new();
     let path_var = std::env::var_os("PATH").unwrap_or_default();
-    let dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
     let exts: Vec<String> = std::env::var("PATHEXT")
         .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
         .split(';')
         .filter(|e| e.starts_with('.'))
         .map(str::to_string)
         .collect();
-    for want in missing {
-        'dirs: for dir in &dirs {
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            for ext in &exts {
-                let cand = dir.join(format!("{want}{ext}"));
+    // dirs 外层单遍 PATH、命中即从 pending 摘除:PATH 目录序 × PATHEXT 序的
+    // 首个命中语义不变,但 is_file(Windows 上每次都是一次 CreateFileW,还要
+    // 过 Defender)只付 O(PATH),不是 O(PATH × bins);候选文件名先算好,
+    // 循环里零 format!
+    let mut pending: Vec<(&str, Vec<String>)> = missing
+        .iter()
+        .map(|w| (*w, exts.iter().map(|e| format!("{w}{e}")).collect()))
+        .collect();
+    for dir in std::env::split_paths(&path_var) {
+        if pending.is_empty() {
+            break;
+        }
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        pending.retain(|(want, names)| {
+            for name in names {
+                let cand = dir.join(name);
                 // WindowsApps 的 app-execution alias(wt.exe)是 0 字节
                 // reparse 文件,is_file 为真、可直接 spawn
                 if cand.is_file() {
                     found.insert(want.to_string(), cand.to_string_lossy().to_string());
-                    break 'dirs;
+                    return false;
                 }
             }
-        }
+            true
+        });
     }
     found
 }
@@ -161,6 +166,12 @@ fn wt_escape(s: &str) -> String {
     s.replace(';', "\\;")
 }
 
+/// NUL 结尾的 UTF-16(*W 系 API 的入参形制;NUL 是防越界读的护栏,
+/// 所有 Win32 宽字符串都走这一份)
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 /// Windows 无深链类恢复目标(Kooky 仅 macOS),全部走 shell 命令
 pub(super) fn deep_link_resume(_meta: &SessionMeta, _term: TerminalApp) -> Option<ResumeOutcome> {
     None
@@ -173,7 +184,7 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
     static CACHE: OnceLock<Vec<TerminalApp>> = OnceLock::new();
     CACHE.get_or_init(|| {
         let bins: Vec<&str> = TerminalApp::ALL.iter().map(|t| t.id()).collect();
-        let found = super::resolve_clis(&bins);
+        let found = resolve_clis(&bins);
         TerminalApp::ALL
             .into_iter()
             .filter(|t| matches!(found.get(t.id()), Some(Some(_))))
@@ -188,26 +199,35 @@ pub fn terminals_for(_agent: AgentId) -> Vec<TerminalApp> {
 
 /// wt/第三方宿主内装的 shell:优先 pwsh(用户装了 7+ 就是它的默认),
 /// 缺席退必装的 Windows PowerShell
-fn powershell_bin() -> Option<String> {
-    super::resolve_cli("pwsh").or_else(|| super::resolve_cli("powershell"))
+fn powershell_bin() -> anyhow::Result<String> {
+    resolve_cli("pwsh")
+        .or_else(|| resolve_cli("powershell"))
+        .ok_or_else(|| anyhow::anyhow!("PowerShell not found"))
 }
 
+/// PowerShell 会话前缀,`-Command` 后接脚本;`-NoExit` 即 keep-open
+const PS_SESSION: [&str; 3] = ["-NoLogo", "-NoExit", "-Command"];
+
 /// 按宿主方言起终端。keep-open 与 POSIX 的 `exec $SHELL` 同位:cmd 用
-/// `/K`,PowerShell 用 `-NoExit`,命令跑完留在交互提示符。
+/// `/K`,PowerShell 用 `-NoExit`,命令跑完留在交互提示符。command 即
+/// mod.rs 经 compose_command 拼好的 PowerShell 形态,PowerShell 系宿主
+/// 直接复用;cmd 宿主方言不同,只能从结构化件重拼。
 pub(super) fn launch_shell(
     term: TerminalApp,
     cli: &str,
     args: &[String],
     cwd: Option<&str>,
+    command: &str,
 ) -> anyhow::Result<()> {
     let bin = term.id();
-    let exe = super::resolve_cli(bin).ok_or_else(|| anyhow::anyhow!("{bin} not found"))?;
+    let exe = resolve_cli(bin).ok_or_else(|| anyhow::anyhow!("{bin} not found"))?;
     let mut cmd = Command::new(&exe);
     match term {
         TerminalApp::Cmd => {
-            // cmd 方言内联注入。raw_arg 绕过 std 的 argv 引号规则——cmd 不做
-            // argv 解析,std 把整串再包一层引号反而会毁掉内层结构;串首是
-            // `cd`/裸词而非引号,cmd 的引号保全规则生效,内层 "…" 原样送达
+            // cmd 方言内联注入(**不得**改用 command:那是 PowerShell 方言)。
+            // raw_arg 绕过 std 的 argv 引号规则——cmd 不做 argv 解析,std 把
+            // 整串再包一层引号反而会毁掉内层结构;串首是 `cd`/裸词而非引号,
+            // cmd 的引号保全规则生效,内层 "…" 原样送达
             let mut line = String::from("/K ");
             if let Some(dir) = cwd {
                 // /d:跨盘符 cd 也生效(会话在 D: 而 cmd 起在 C: 的情形)
@@ -219,37 +239,42 @@ pub(super) fn launch_shell(
                 line.push_str(&cmd_quote(a));
             }
             cmd.raw_arg(line);
-            cmd.creation_flags(CREATE_NEW_CONSOLE);
         }
         TerminalApp::Pwsh | TerminalApp::WindowsPowershell => {
-            cmd.args(["-NoLogo", "-NoExit", "-Command", &compose_command(cli, args, cwd)]);
-            cmd.creation_flags(CREATE_NEW_CONSOLE);
+            cmd.args(PS_SESSION).arg(command);
         }
         TerminalApp::WindowsTerminal => {
             // wt 装 PowerShell 会话。工作目录走 wt 自己的 -d,脚本只剩纯调用
             // 段(见 ps_call);所有透传参数过 wt_escape——wt 的 `;` 切分
             // 无视引号,不转义的分号会把命令行腰斩成两个面板
-            let ps = powershell_bin().ok_or_else(|| anyhow::anyhow!("PowerShell not found"))?;
             if let Some(dir) = cwd {
                 cmd.args(["-d", &wt_escape(dir)]);
             }
-            cmd.args([&wt_escape(&ps), "-NoLogo", "-NoExit", "-Command", &wt_escape(&ps_call(cli, args))]);
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.arg(wt_escape(&powershell_bin()?));
+            cmd.args(PS_SESSION).arg(wt_escape(&ps_call(cli, args)));
         }
         TerminalApp::Alacritty | TerminalApp::WezTerm => {
             // 第三方宿主装 PowerShell 会话:脚本全单引号、无内层双引号,经
             // 宿主的 argv 重引号(std → 宿主 → CreateProcess)往返无损;
             // 两家 argv 直传、无 wt 那套 `;` 语义,cd 留在脚本里
-            let ps = powershell_bin().ok_or_else(|| anyhow::anyhow!("PowerShell not found"))?;
             if term == TerminalApp::WezTerm {
                 cmd.args(["start", "--"]);
             } else {
                 cmd.arg("-e");
             }
-            cmd.args([ps.as_str(), "-NoLogo", "-NoExit", "-Command", &compose_command(cli, args, cwd)]);
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.arg(powershell_bin()?);
+            cmd.args(PS_SESSION).arg(command);
         }
     }
+    // 控制台宿主开自己的新窗即终端本体;wt/第三方的 CLI stub 是 console
+    // 子系统,NO_WINDOW 压掉从 GUI 进程起动时闪现的空控制台(对 GUI 子进程
+    // 无效果)
+    cmd.creation_flags(match term {
+        TerminalApp::Cmd | TerminalApp::Pwsh | TerminalApp::WindowsPowershell => CREATE_NEW_CONSOLE,
+        TerminalApp::WindowsTerminal | TerminalApp::Alacritty | TerminalApp::WezTerm => {
+            CREATE_NO_WINDOW
+        }
+    });
     spawn_and_reap(cmd)?;
     Ok(())
 }
@@ -270,9 +295,10 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    // windows-sys 里它归 Win32_System_Ole feature,为一个钉死的小常量不拉
     const CF_UNICODETEXT: u32 = 13;
 
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide = wide(text);
     let bytes = wide.len() * 2;
     unsafe {
         let mut opened = false;
@@ -321,7 +347,6 @@ pub(super) fn alert_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
     };
-    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let text = wide(message);
     let caption = wide("Wake can't start");
     unsafe {

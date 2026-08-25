@@ -45,6 +45,12 @@ pub const REVEAL_IN_FM: &str = if cfg!(target_os = "macos") {
     "Reveal in File Manager"
 };
 
+/// 系统回收站的平台名词(macOS 与 freedesktop 都叫 Trash,Windows 是
+/// Recycle Bin)。删除确认/成功通知/菜单项一律引用,与 wake-core
+/// windows.rs 失败文案的名词保持同一个词。
+pub const TRASH_NOUN: &str =
+    if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
+
 /// ⌘K 面板的唯一绑定串——main.rs 的 bind_keys 与下方徽标同源,改键只动这里
 pub const SEARCH_KEYSTROKE: &str = "secondary-k";
 
