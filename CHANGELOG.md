@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## [0.2.6] — 2026-08-25
 
-- Fix: OpenCode 2 next-channel sessions are discovered in `opencode-next.db` and parsed from the real `session` + `session_message` schema, while the original `opencode.db` path remains enabled and can be managed independently
+- Fix: OpenCode 2 next-channel sessions are discovered in `opencode-next.db` and parsed from the real `session` + `session_message` schema, while the original `opencode.db` path remains enabled
+- Fix: OpenCode stable and next database paths can be scanned, edited, and removed independently in Session locations
 
 ## [0.2.5] — 2026-08-25
 
