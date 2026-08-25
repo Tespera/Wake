@@ -16,9 +16,9 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other pr
 ## Features
 
 - **Unified browsing** — all sessions grouped by agent / project, live file watching for incremental updates
-- **Full-text search** (⌘K) — SQLite FTS5 trigram index; handles CJK text and code substrings (like `useEffect(`) equally well; jumps straight to the matched message in the transcript
+- **Full-text search** (⌘K / Ctrl+K) — SQLite FTS5 trigram index; handles CJK text and code substrings (like `useEffect(`) equally well; jumps straight to the matched message in the transcript
 - **Transcript view** — per-message rendering with user/assistant bubbles, collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
-- **One-click resume** — reopens the session in Terminal/iTerm at the original project directory (`claude --resume`, `codex resume`, …)
+- **One-click resume** — reopens the session in your terminal (Terminal/iTerm on macOS; native terminal hosts on Linux and Windows) at the original project directory (`claude --resume`, `codex resume`, …)
 - **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown, delete (system Trash + tombstone so deleted sessions stay deleted)
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
@@ -59,7 +59,7 @@ On the author's machine (~310 sessions, ~800 MB of JSONL): full index ~5 s, subs
 
 ## Install
 
-Build from source (requires a Rust toolchain):
+Download `Wake-<version>-macos.zip` from the [latest release](https://github.com/iAmCorey/Wake/releases/latest), unzip, and drag Wake to Applications. Or build from source (requires a Rust toolchain):
 
 ```bash
 git clone https://github.com/iAmCorey/Wake && cd Wake
@@ -71,7 +71,7 @@ The app is ad-hoc signed, so if you download a prebuilt copy instead of building
 
 ### Linux (experimental)
 
-Prebuilt packages for arm64 and x86_64 are attached to each release: a `.deb`, and a tar.gz with a user-level `install.sh` (no root needed). Or build from source:
+Prebuilt packages for arm64 and x86_64 (asset names use Debian's `amd64`) are attached to each release: a `.deb`, and a tar.gz with a user-level `install.sh` (no root needed). Or build from source:
 
 ```bash
 sudo apt-get install -y libasound2-dev libfontconfig1-dev libwayland-dev \
@@ -84,7 +84,7 @@ The data layer, rendering and search are fully tested on Linux; terminal-resume 
 
 ### Windows (experimental)
 
-Build from source (requires a Rust toolchain with the MSVC target):
+Download `wake-<version>-windows-x86_64.zip` from the [latest release](https://github.com/iAmCorey/Wake/releases/latest), unzip, and run `Wake.exe` — the binary is unsigned, so SmartScreen may block the first launch (click *More info* → *Run anyway*). Or build from source (requires a Rust toolchain with the MSVC target):
 
 ```powershell
 git clone https://github.com/iAmCorey/Wake; cd Wake
@@ -92,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File scripts/make-windows.ps1   # builds dis
 # or just: cargo run -p wake
 ```
 
-Resume opens sessions in Windows Terminal, PowerShell, Command Prompt, Alacritty or WezTerm (whichever are installed); delete goes to the Recycle Bin. Agent data lives in the same `~/.claude`-style directories under your user profile, so everything indexed on macOS/Linux is indexed here too. Same beta caveat as Linux: the data layer is fully tested, desktop integration has seen less mileage — issues welcome.
+Resume opens sessions in Windows Terminal, PowerShell (7+ or the built-in Windows PowerShell), Command Prompt, Alacritty or WezTerm (whichever are installed); delete goes to the Recycle Bin. Agent data lives in the same `~/.claude`-style directories under your user profile, so everything indexed on macOS/Linux is indexed here too. Same beta caveat as Linux: the data layer is fully tested, desktop integration has seen less mileage — issues welcome.
 
 ## Development
 
@@ -104,6 +104,7 @@ cargo test -p wake-core                # data-layer tests only (adapter contract
 cargo run -p wake-core --bin scan      # data-layer smoke test: scan and print stats
 cargo run -p wake-core --bin scan -- --search "useEffect("   # search smoke test
 WAKE_THEME=dark cargo run -p wake      # force dark/light (defaults to system)
+WAKE_HOME=/path cargo run -p wake      # point all agent adapters at a different home dir (portable installs, testing)
 git config core.hooksPath scripts/hooks   # optional: run tests before every commit
 python3 scripts/demo-home.py           # build a synthetic fake-home dataset for screenshots/demos
 ```
@@ -120,9 +121,9 @@ crates/
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free)
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
-│   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones
+│   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones (+ location & schema meta tables)
 │   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash
-└── wake             # GPUI app (three-pane workbench + ⌘K palette)
+└── wake             # GPUI app (three-pane workbench + ⌘K / Ctrl+K palette)
 ```
 
 Design notes live in [DESIGN.md](DESIGN.md), product decisions in [PRODUCT.md](PRODUCT.md).

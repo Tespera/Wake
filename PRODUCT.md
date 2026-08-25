@@ -4,7 +4,7 @@
 
 ## Platform
 
-macos(原生桌面,Rust + GPUI;非 web)
+macos(主平台,原生桌面,Rust + GPUI;非 web);Linux(experimental,2026-08-24 起,arm64/x86_64 预编包)与 Windows(experimental,2026-08-25 起,x86_64 zip)为次级平台,数据层三端同测,桌面集成 experimental
 
 ## Stack
 
@@ -12,7 +12,7 @@ Rust + gpui 0.2 + gpui-component 0.5(用户既定,workspace: crates/wake-core �
 
 ## Users
 
-Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.2.0 2026-08-20,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
+Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.2.7 2026-08-25,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
 
 ## Product Purpose
 
@@ -28,7 +28,7 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Capabilities and Constraints
 
-已实现:十三家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(adapter 契约、DB 往返、scanner 回归 + CI + pre-commit,合成 fixture)。
+已实现:十三家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(adapter 契约、DB 往返、scanner 回归 + CI 三平台 + pre-commit,合成 fixture)、三端桌面(macOS 主平台;Linux/Windows experimental,终端恢复/废纸篓·回收站/剪贴板按平台原生实现,发版 CI 自动出六产物)。
 约束:对 agent 数据目录只读;绝不写 Codex 的 SQLite;不读凭证;GPUI 无 SF Symbols(图标用 lucide SVG 自备)。
 已支持十三家 agent:Claude Code、Codex、Copilot CLI、Cursor(CLI transcripts)、OpenCode(含 OpenCode 2 next,stable 的 `opencode.db` 与 next 的 `opencode-next.db` 同时扫描;逐会话兼容 `message+part`、真实 `session+session_message` 及早期 `session_v2` schema;preview 会话标 opencode2 徽章)、Kiro、Gemini CLI(2026-08-17 P1 五家落地)+ Pi、Oh My Pi、Grok Build、Kimi Code、Antigravity CLI(2026-08-19 对齐 kooky 内置 roster;Antigravity 正文加密仅元数据卡片)+ DeepSeek Harness(dsh,2026-08-20,zstd 事件日志透明解压;格式由源码推断,当天用户跑出真实会话完成首验)。做不了的:Cursor IDE chats 正文加密,Windsurf/Trae 加密,Amp/Factory(Droid)/Warp 云端无本地数据,Reasonix 本机零会话格式未实测。
 

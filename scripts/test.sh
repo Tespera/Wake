@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Wake 本地测试入口——改完代码跑一跑(对齐 kooky 的 `swift test` 习惯)。
 #
-#   scripts/test.sh           # 数据层 48 测试 + UI 编译门槛,~秒级
+#   scripts/test.sh           # 数据层 50 测试 + UI 编译门槛,~秒级
 #   scripts/test.sh --smoke   # 追加真实数据冒烟:全量扫描统计(人眼对量级,
 #                             # 基准见 CLAUDE.md;只读你本机的 agent 数据)
 set -euo pipefail
