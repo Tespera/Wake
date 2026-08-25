@@ -71,7 +71,7 @@ The app is ad-hoc signed, so if you download a prebuilt copy instead of building
 
 ### Linux (experimental)
 
-Prebuilt arm64 packages are attached to each release: a `.deb`, and a tar.gz with a user-level `install.sh` (no root needed). Or build from source:
+Prebuilt packages for arm64 and x86_64 are attached to each release: a `.deb`, and a tar.gz with a user-level `install.sh` (no root needed). Or build from source:
 
 ```bash
 sudo apt-get install -y libasound2-dev libfontconfig1-dev libwayland-dev \
