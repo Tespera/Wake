@@ -2,12 +2,12 @@
 
 [![License](https://img.shields.io/github/license/iAmCorey/Wake?style=flat-square)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
-[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20Linux%20beta-007AFF?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20Linux%20beta%20%7C%20Windows%20beta-007AFF?style=flat-square)](https://github.com/iAmCorey/Wake/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/iAmCorey/Wake/total?style=flat-square)](https://github.com/iAmCorey/Wake/releases)
 [![Stars](https://img.shields.io/github/stars/iAmCorey/Wake?style=flat-square)](https://github.com/iAmCorey/Wake/stargazers)
 [![CI](https://img.shields.io/github/actions/workflow/status/iAmCorey/Wake/ci.yml?branch=main&label=CI&style=flat-square)](https://github.com/iAmCorey/Wake/actions/workflows/ci.yml)
 
-A native desktop app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5). macOS first; experimental Linux support since v0.2.5.
+A native desktop app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5). macOS first; experimental Linux support since v0.2.5, experimental Windows support since v0.2.7.
 
 Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
@@ -51,7 +51,7 @@ Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Dro
 - Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases
 - Credential files (`auth.json` and friends) are never read
 - Zero network requests — Wake never constructs or calls an HTTP client (GPUI's dependency tree bundles one; Wake doesn't reach for it)
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds)
+- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds)
 
 ## Performance
 
@@ -82,6 +82,18 @@ scripts/make-linux.sh        # builds dist/wake-<version>-linux-<arch>.tar.gz an
 
 The data layer, rendering and search are fully tested on Linux; terminal-resume targets and desktop integration have seen less real-desktop mileage yet — issues welcome.
 
+### Windows (experimental)
+
+Build from source (requires a Rust toolchain with the MSVC target):
+
+```powershell
+git clone https://github.com/iAmCorey/Wake; cd Wake
+powershell -ExecutionPolicy Bypass -File scripts/make-windows.ps1   # builds dist/wake-<version>-windows-<arch>.zip
+# or just: cargo run -p wake
+```
+
+Resume opens sessions in Windows Terminal, PowerShell, Command Prompt, Alacritty or WezTerm (whichever are installed); delete goes to the Recycle Bin. Agent data lives in the same `~/.claude`-style directories under your user profile, so everything indexed on macOS/Linux is indexed here too. Same beta caveat as Linux: the data layer is fully tested, desktop integration has seen less mileage — issues welcome.
+
 ## Development
 
 ```bash
@@ -109,7 +121,7 @@ crates/
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
 │   ├── db.rs        #   rusqlite (WAL): sessions / messages / messages_fts / user_data / tombstones
-│   └── services/    #   terminal resume (AppleScript) / export / trash
+│   └── services/    #   terminal resume (per-platform: AppleScript / argv / Win32) / export / trash
 └── wake             # GPUI app (three-pane workbench + ⌘K palette)
 ```
 

@@ -21,7 +21,7 @@ pub struct CopilotAdapter {
 impl CopilotAdapter {
     pub fn new() -> Self {
         Self {
-            db: dirs::home_dir()
+            db: super::home_dir()
                 .unwrap_or_default()
                 .join(".copilot")
                 .join("session-store.db"),

@@ -331,8 +331,13 @@ pub fn is_injected_user_content(text: &str) -> bool {
         return true;
     }
     // Codex 的 skill 展开体:skill-name + SKILL.md 路径 + frontmatter(不带 $,
-    // 用户手打的 "$skill" 引用是另一条独立消息,不受影响)
-    t.contains("/.codex/plugins/") || (t.contains("/plugins/cache/") && t.contains("SKILL.md"))
+    // 用户手打的 "$skill" 引用是另一条独立消息,不受影响)。路径子串两种
+    // 分隔符都认——Windows 上 Codex 写进日志的是反斜杠路径,只匹配 '/'
+    // 会让展开体漏过滤、灌进正文与 FTS(2026-08-25 review)
+    t.contains("/.codex/plugins/")
+        || t.contains(r"\.codex\plugins\")
+        || ((t.contains("/plugins/cache/") || t.contains(r"\plugins\cache\"))
+            && t.contains("SKILL.md"))
 }
 
 /// tool 输入的单行摘要

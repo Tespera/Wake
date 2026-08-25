@@ -18,7 +18,7 @@ pub struct CursorAdapter {
 impl CursorAdapter {
     pub fn new() -> Self {
         Self {
-            root: dirs::home_dir()
+            root: super::home_dir()
                 .unwrap_or_default()
                 .join(".cursor")
                 .join("projects"),

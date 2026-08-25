@@ -19,3 +19,10 @@ gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
 futures = "0.3"
 chrono.workspace = true
 dirs.workspace = true
+
+# exe 图标 + 版本资源(build.rs 里按 CARGO_CFG_TARGET_OS 判目标生效)。
+# 不做 target 门控:build-dependencies 的 [target.*] 匹配语义在 host/target
+# 之间有历史歧义,门控错方向 build.rs 直接解析失败;它是纯 Rust 小依赖,
+# 三平台无条件编译换四种 host×target 组合全对
+[build-dependencies]
+winresource = "0.1"

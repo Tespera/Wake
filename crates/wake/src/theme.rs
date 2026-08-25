@@ -159,8 +159,11 @@ pub fn apply_wake_theme(cx: &mut App) {
         theme.overlay = gpui::hsla(0., 0., 0., 0.25);
     }
 
-    // 系统字体与 macOS 圆角习惯
-    theme.font_family = ".AppleSystemUIFont".into();
+    // 系统字体与 macOS 圆角习惯。`.SystemUIFont` 是 gpui 各平台后端都认的
+    // 别名(macOS 解到 .AppleSystemUIFont,Windows 的 DirectWrite 后端解到
+    // 系统 UI 字体);写死 `.AppleSystemUIFont` 会让非 mac 平台每个字重都
+    // 走一遍"找不到→回落"的错误路径(2026-08-25 review)
+    theme.font_family = ".SystemUIFont".into();
     theme.font_size = gpui::px(14.);
     theme.radius = gpui::px(8.);
     theme.radius_lg = gpui::px(12.);

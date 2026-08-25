@@ -20,7 +20,7 @@ pub struct AntigravityAdapter {
 impl AntigravityAdapter {
     pub fn new() -> Self {
         Self {
-            db: dirs::home_dir()
+            db: super::home_dir()
                 .unwrap_or_default()
                 .join(".gemini")
                 .join("antigravity-cli")

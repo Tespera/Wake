@@ -154,7 +154,7 @@ fn known_db_paths(dir: &Path) -> Vec<PathBuf> {
 /// 两个固定候选都常驻 roster,这样 Wake 启动后才安装任一 CLI,普通刷新也能发现。
 /// OPENCODE_DB 若被 GUI 进程继承则作为额外候选,但绝不压掉两个标准位置。
 fn default_db_paths() -> Vec<PathBuf> {
-    let default_dir = dirs::home_dir()
+    let default_dir = super::home_dir()
         .unwrap_or_default()
         .join(".local")
         .join("share")
