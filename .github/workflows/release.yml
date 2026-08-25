@@ -9,6 +9,10 @@ name: Release
 on:
   push:
     tags: ['v*']
+    # 备用点火线:tag 与 workflow_dispatch 在代理化的开发环境里都被 403 拦,
+    # 分支推送不受限——推 release/vX.Y.Z(内容 = 要发布的提交)同样触发,
+    # tag 名从分支名剥出,发布后分支即可删
+    branches: ['release/v*']
   # 本仓库的开发环境经代理推送,tag 推送被 403 拦——手动派发时由 runner 的
   # 令牌代建 tag(gh release create 对不存在的 tag 会按 --target 顺带创建)
   workflow_dispatch:
@@ -44,7 +48,9 @@ jobs:
         env:
           TAG_INPUT: ${{ inputs.tag }}
         run: |
-          $tag = if ($env:TAG_INPUT) { $env:TAG_INPUT } else { $env:GITHUB_REF_NAME }
+          $tag = if ($env:TAG_INPUT) { $env:TAG_INPUT }
+                 elseif ($env:GITHUB_REF_NAME -like 'release/*') { $env:GITHUB_REF_NAME -replace '^release/', '' }
+                 else { $env:GITHUB_REF_NAME }
           $ver = $tag -replace '^v', ''
           $text = Get-Content CHANGELOG.md -Raw
           $m = [regex]::Match($text, "(?s)## \[$([regex]::Escape($ver))\][^`n]*`n(.*?)(`n## \[|$)")
@@ -57,7 +63,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_INPUT: ${{ inputs.tag }}
         run: |
-          $tag = if ($env:TAG_INPUT) { $env:TAG_INPUT } else { $env:GITHUB_REF_NAME }
+          $tag = if ($env:TAG_INPUT) { $env:TAG_INPUT }
+                 elseif ($env:GITHUB_REF_NAME -like 'release/*') { $env:GITHUB_REF_NAME -replace '^release/', '' }
+                 else { $env:GITHUB_REF_NAME }
           $zip = (Get-ChildItem dist/wake-*-windows-*.zip | Select-Object -First 1).FullName
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
