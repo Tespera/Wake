@@ -485,7 +485,7 @@ impl SettingsView {
                     .items_center()
                     .pt(px(64.))
                     .child(
-                        img("brands/wake.png")
+                        img("brands/wake.svg")
                             .size(px(78.))
                             .flex_shrink_0()
                             .mb(SPACE_MD),

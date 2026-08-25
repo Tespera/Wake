@@ -58,7 +58,7 @@ brands!(
 
 fn lookup_product(path: &str) -> Option<&'static [u8]> {
     match path {
-        "brands/wake.png" => Some(include_bytes!("../assets/icon-1024.png")),
+        "brands/wake.svg" => Some(include_bytes!("../assets/icon.svg")),
         _ => None,
     }
 }
