@@ -91,6 +91,19 @@ pub trait AgentAdapter: Send + Sync {
     /// 侧档(gemini projects.json / kimi session_index / codex state DB)必须
     /// 全部相对 `dir` 派生,落回默认家目录就会拿错树。新增 adapter 必须实现。
     fn with_custom_root(&self, dir: std::path::PathBuf) -> Box<dyn AgentAdapter>;
+    /// 是否允许 Session locations 单独压制某条默认数据根。多数 adapter 的多个
+    /// 根共同组成一个不可拆 location；OpenCode 的 stable/next 库则彼此独立。
+    fn supports_individual_root_removal(&self) -> bool {
+        false
+    }
+    /// 返回排除指定默认根后的同类 adapter。只在上一能力为 true 时调用；None
+    /// 表示不支持按根裁剪。
+    fn excluding_data_roots(
+        &self,
+        _roots: &[std::path::PathBuf],
+    ) -> Option<Box<dyn AgentAdapter>> {
+        None
+    }
 }
 
 /// 入库前的自定义根归一化:把用户选中的目录整形成本家"该存哪一层"的形态。
@@ -164,6 +177,14 @@ pub fn create_adapters_with(
     custom_roots: &[(AgentId, std::path::PathBuf)],
     removed_defaults: &[AgentId],
 ) -> Vec<Box<dyn AgentAdapter>> {
+    create_adapters_with_root_overrides(custom_roots, removed_defaults, &[])
+}
+
+fn create_adapters_with_root_overrides(
+    custom_roots: &[(AgentId, std::path::PathBuf)],
+    removed_defaults: &[AgentId],
+    removed_default_roots: &[(AgentId, std::path::PathBuf)],
+) -> Vec<Box<dyn AgentAdapter>> {
     let base = create_adapters();
     let customs: Vec<Box<dyn AgentAdapter>> = custom_roots
         .iter()
@@ -173,10 +194,26 @@ pub fn create_adapters_with(
                 .map(|a| a.with_custom_root(root.clone()))
         })
         .collect();
-    let mut v: Vec<Box<dyn AgentAdapter>> = base
-        .into_iter()
-        .filter(|a| !removed_defaults.contains(&a.agent()))
-        .collect();
+    let mut v: Vec<Box<dyn AgentAdapter>> = Vec::new();
+    for adapter in base {
+        if removed_defaults.contains(&adapter.agent()) {
+            continue;
+        }
+        let excluded: Vec<std::path::PathBuf> = removed_default_roots
+            .iter()
+            .filter(|(agent, _)| *agent == adapter.agent())
+            .map(|(_, path)| path.clone())
+            .collect();
+        if excluded.is_empty() {
+            v.push(adapter);
+        } else if let Some(filtered) = adapter.excluding_data_roots(&excluded) {
+            if !filtered.data_roots().is_empty() {
+                v.push(filtered);
+            }
+        } else {
+            v.push(adapter);
+        }
+    }
     v.extend(customs);
     v
 }
@@ -186,8 +223,8 @@ pub fn create_adapters_with(
 /// 删除检测会把自定义根的会话当"磁盘已删"整批清掉,再把被压制的默认根加回
 /// (2026-08-24 Codex review 抓到 scan bin 正是这么毁数据的)
 pub fn create_adapters_for(store: &crate::db::Store) -> Vec<Box<dyn AgentAdapter>> {
-    let (customs, removed) = store.location_overrides();
-    create_adapters_with(&customs, &removed)
+    let (customs, removed, removed_roots) = store.location_overrides();
+    create_adapters_with_root_overrides(&customs, &removed, &removed_roots)
 }
 
 /// 数据根是否拥有该会话文件路径。边界必须落在分隔符(目录型)或 '#'(SQLite

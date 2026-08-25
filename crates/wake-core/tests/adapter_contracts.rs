@@ -33,6 +33,7 @@ use wake_core::models::*;
 struct TestEnv {
     copilot_db: PathBuf,
     opencode_db: PathBuf,
+    opencode_next_db: PathBuf,
     antigravity_db: PathBuf,
     dsh_log: PathBuf,
     /// 假 HOME 目录本体,持有 TempDir 保证整个测试进程期间不被清理
@@ -41,7 +42,7 @@ struct TestEnv {
 
 static ENV: OnceLock<TestEnv> = OnceLock::new();
 
-/// 所有测试的第一步:建假 HOME(含两只 SQLite fixture 库与 gemini 的
+/// 所有测试的第一步:建假 HOME(含 SQLite fixture 库与 gemini 的
 /// projects.json)并把 HOME 指过去。必须先于任何 Adapter::new()。
 fn setup() -> &'static TestEnv {
     ENV.get_or_init(|| {
@@ -59,6 +60,8 @@ fn setup() -> &'static TestEnv {
         fs::create_dir_all(&oc_dir).expect("mkdir opencode dir");
         let opencode_db = oc_dir.join("opencode.db");
         build_opencode_db(&opencode_db);
+        let opencode_next_db = oc_dir.join("opencode-next.db");
+        build_opencode_next_db(&opencode_next_db);
 
         let gem_dir = home.path().join(".gemini");
         fs::create_dir_all(&gem_dir).expect("mkdir .gemini");
@@ -122,6 +125,7 @@ fn setup() -> &'static TestEnv {
         TestEnv {
             copilot_db,
             opencode_db,
+            opencode_next_db,
             antigravity_db,
             dsh_log,
             _home: home,
@@ -213,6 +217,52 @@ fn build_opencode_db(path: &Path) {
         "#,
     )
     .expect("populate opencode fixture db");
+}
+
+/// `opencode-ai@next`/binary `opencode2` 的真实同构布局(GitHub #2):数据库名
+/// `opencode-next.db`,会话元数据仍在 session,新正文才在 session_message。
+/// message/part 两张 v1 表仍随 migration 存在但本会话没有对应行——只检查
+/// session_v2 或只对 part 求长度都会把它静默过滤。
+fn build_opencode_next_db(path: &Path) {
+    let conn = rusqlite::Connection::open(path).expect("create opencode next fixture db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE session (
+            id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT,
+            time_created INTEGER, time_updated INTEGER, model TEXT,
+            tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER,
+            time_archived INTEGER, version TEXT
+        );
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT, time_created INTEGER);
+        CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, data TEXT);
+        CREATE TABLE session_message (
+            id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+            time_created INTEGER, time_updated INTEGER, data TEXT
+        );
+        INSERT INTO session VALUES
+            ('ocnext-0001', NULL, '/Users/tester/Github/wakefx', 'OpenCode next real schema',
+             1786200000000, 1786200300000,
+             '{"id":"gpt-5.6","providerID":"openai","variant":"default"}',
+             20, 8, 4, NULL, '0.0.0-next-202606270058');
+        INSERT INTO session_message VALUES
+            ('next-m0','ocnext-0001','user',0,1786200000000,1786200000000,
+             '{"text":"OpenCode next 检查二维码组件","time":{"created":1786200000000},"files":[],"agents":[]}'),
+            ('next-m1','ocnext-0001','synthetic',1,1786200001000,1786200001000,
+             '{"sessionID":"ocnext-0001","text":"editor context: QrScanner.tsx","time":{"created":1786200001000}}'),
+            ('next-m2','ocnext-0001','assistant',2,1786200002000,1786200002000,
+             '{"agent":"build","model":{"id":"gpt-5.6","providerID":"openai","variant":"default"},"time":{"created":1786200002000},"content":[{"type":"reasoning","id":"rsn-1","text":"检查 effect 清理"},{"type":"tool","id":"tool-1","name":"grep","state":{"status":"completed","input":{"pattern":"useEffect"},"structured":{},"content":[{"type":"text","text":"src/QrScanner.tsx:42"}],"result":{"matches":1}},"time":{"created":1786200002100,"completed":1786200002200}},{"type":"text","id":"txt-1","text":"next schema 解析成功。"}]}'),
+            ('next-m3','ocnext-0001','system',3,1786200003000,1786200003000,
+             '{"text":"system notice","time":{"created":1786200003000}}'),
+            ('next-m4','ocnext-0001','shell',4,1786200004000,1786200004000,
+             '{"callID":"shell-1","command":"cargo test","output":"ok","time":{"created":1786200004000,"completed":1786200004100}}'),
+            ('next-m5','ocnext-0001','compaction',5,1786200005000,1786200005000,
+             '{"reason":"auto","summary":"保留二维码排查上下文","recent":"","time":{"created":1786200005000}}'),
+            ('next-m6','ocnext-0001','agent-switched',6,1786200006000,1786200006000,
+             '{"agent":"build","time":{"created":1786200006000}}'),
+            ('next-m7','ocnext-0001','wibble-next',7,1786200007000,1786200007000,'{}');
+        "#,
+    )
+    .expect("populate opencode next fixture db");
 }
 
 /// Antigravity `conversation_summaries.db` 最小同构库:标题在 preview 列
@@ -665,6 +715,92 @@ fn opencode_v2_parse_contract() {
         .parse_session(&db_ref(AgentId::Opencode, &env.opencode_db, "oc-0001"))
         .expect("opencode v1 parse_session");
     assert_eq!(s1.meta.source, None);
+}
+
+#[test]
+fn opencode_next_real_schema_contract() {
+    let env = setup();
+    let adapter = OpencodeAdapter::new();
+    let roots = adapter.data_roots();
+    assert!(roots.contains(&env.opencode_db), "stable 数据库路径必须保留");
+    assert!(roots.contains(&env.opencode_next_db), "next 数据库路径必须新增扫描");
+
+    let refs = adapter.list_session_files().expect("opencode stable + next list");
+    let r = refs
+        .iter()
+        .find(|r| r.native_id == "ocnext-0001")
+        .expect("真实 session + session_message 会话应被列出");
+    assert!(r.file_path.starts_with(env.opencode_next_db.to_string_lossy().as_ref()));
+    let quick = adapter.quick_meta(&refs).expect("opencode next quick meta");
+    assert_eq!(
+        quick.get(&r.file_path).and_then(|m| m.source.as_deref()),
+        Some("opencode2"),
+        "列表快路径也必须带 preview 标记"
+    );
+
+    let s = adapter.parse_session(r).expect("opencode next parse_session");
+    let t = adapter.parse_transcript(r).expect("opencode next parse_transcript");
+    assert_eq!(s.meta.title, "OpenCode next real schema");
+    assert_eq!(s.meta.model.as_deref(), Some("gpt-5.6"));
+    assert_eq!(s.meta.tokens_used, Some(32));
+    assert_eq!(s.meta.source.as_deref(), Some("opencode2"));
+    assert_eq!(s.meta.message_count, 3); // user + assistant + shell tool-only message
+    assert_eq!(s.unknown_line_count, 1); // only wibble-next;状态切换是已知元数据
+
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Text),
+            (Role::User, MessageKind::Meta),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::Meta),
+            (Role::Assistant, MessageKind::Text),
+            (Role::System, MessageKind::CompactSummary),
+        ]
+    );
+    let assistant = &t.mainline[2];
+    assert_eq!(assistant.text, "next schema 解析成功。");
+    assert!(assistant.thinking.as_deref().unwrap_or_default().contains("effect 清理"));
+    assert_eq!(assistant.tool_calls.len(), 1);
+    assert_eq!(assistant.tool_calls[0].id, "tool-1");
+    assert_eq!(assistant.tool_calls[0].name, "grep");
+    assert_eq!(assistant.tool_calls[0].output.as_deref(), Some("src/QrScanner.tsx:42"));
+    assert_eq!(t.mainline[4].tool_calls[0].name, "shell");
+    assert_eq!(t.mainline[5].kind, MessageKind::CompactSummary);
+    assert_eq!(s.units.iter().map(|u| u.seq).collect::<Vec<_>>(), vec![0, 2, 4]);
+}
+
+#[test]
+fn opencode_default_databases_can_be_removed_individually() {
+    let env = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let store = wake_core::db::Store::open(&dir.path().join("wake.db")).unwrap();
+
+    store
+        .add_removed_default_root("opencode", env.opencode_next_db.to_str().unwrap())
+        .unwrap();
+    let roster = wake_core::adapters::create_adapters_for(&store);
+    let adapter = roster
+        .iter()
+        .find(|a| a.agent() == AgentId::Opencode)
+        .expect("移除 next 根后 stable adapter 仍应保留");
+    assert!(adapter.supports_individual_root_removal());
+    assert!(adapter.data_roots().contains(&env.opencode_db));
+    assert!(!adapter.data_roots().contains(&env.opencode_next_db));
+    assert!(adapter
+        .list_session_files()
+        .unwrap()
+        .iter()
+        .any(|r| r.native_id == "oc-0001"));
+
+    store
+        .add_removed_default_root("opencode", env.opencode_db.to_str().unwrap())
+        .unwrap();
+    let roster = wake_core::adapters::create_adapters_for(&store);
+    assert!(
+        roster.iter().all(|a| a.agent() != AgentId::Opencode),
+        "两条默认库都被移除后不应留下空 adapter"
+    );
 }
 
 #[test]

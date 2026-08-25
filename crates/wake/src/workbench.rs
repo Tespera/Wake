@@ -436,19 +436,23 @@ struct DataSourceRow {
     exists: bool,
     /// Some(落库路径) = 自定义行(路径可能是本行根的上层目录);None = 预设行
     custom: Option<SharedString>,
+    /// 预设行是否能只压制本路径，而不关闭该 agent 的整个默认实例。
+    individual_default: bool,
 }
 
-/// location 表单的语义目标。预设行的"编辑/删除"落库为**压制默认 + 记自定义**:
-/// 默认根随 env(CODEX_HOME 等)在构造时活解析,不能物化成一行路径
+/// location 表单的语义目标。预设行的"编辑/删除"落库为**压制默认 + 记自定义**；
+/// 多产品库可按真实 root 单独压制，其余 adapter 仍按整家默认实例处理。
 #[derive(Clone)]
 enum FormTarget {
     Add,
     /// 编辑既有一行。custom=true:path 是落库的自定义路径(编辑单位);
-    /// custom=false:path 是被点预设行的展示路径(无改动判定与 Finder 用)
+    /// custom=false:path 是预填表单的路径；root 始终是被点行的真实数据根。
     Edit {
         agent: AgentId,
         path: SharedString,
+        root: SharedString,
         custom: bool,
+        individual_default: bool,
     },
 }
 
@@ -704,30 +708,33 @@ impl Workbench {
         // 独立 flat_map 再按位置 zip 计数,靠的是遍历顺序一致这条隐形契约。
         // 文本一律预先算成 SharedString:dialog builder 存的是 Rc<dyn Fn>,
         // 面板开着时每帧重跑,留 format!/String::clone 在里面就是每帧堆分配
-        let mut flat: Vec<(AgentId, PathBuf)> = self
+        let mut flat: Vec<(AgentId, PathBuf, bool)> = self
             .adapters
             .iter()
             .flat_map(|a| {
                 let agent = a.agent();
-                a.data_roots().into_iter().map(move |r| (agent, r))
+                let individual = a.supports_individual_root_removal();
+                a.data_roots()
+                    .into_iter()
+                    .map(move |r| (agent, r, individual))
             })
             .collect();
         // 按 AgentId 声明序稳定排序:自定义根紧随该家默认根之后成组展示
         // (roster 里 customs 追加在尾部,不排会飘到列表底部与所属家分离);
         // 稳定排序保证同家内默认在前、codex 的 sessions/archived 相邻不散
-        flat.sort_by_key(|(a, _)| *a);
+        flat.sort_by_key(|(a, _, _)| *a);
         // 带上 agent:计数按 (agent, 根) 归属,不然一家的根被 env 搬进另一家
         // 树下时,会话会整批记到别家行上
         let prefixes: Vec<(String, String)> = flat
             .iter()
-            .map(|(a, r)| (a.as_str().to_string(), r.to_string_lossy().to_string()))
+            .map(|(a, r, _)| (a.as_str().to_string(), r.to_string_lossy().to_string()))
             .collect();
         let counts = self
             .store
             .counts_by_path_prefix(&prefixes)
             .unwrap_or_else(|_| vec![0; prefixes.len()]);
         // 直接查库,不设镜像字段:面板打开是点击路径,微秒级查询无需缓存
-        let (customs, removed) = self.store.location_overrides();
+        let (customs, removed, removed_roots) = self.store.location_overrides();
         let customs: Vec<(AgentId, SharedString)> = customs
             .into_iter()
             .map(|(a, p)| (a, SharedString::from(p.to_string_lossy().to_string())))
@@ -736,7 +743,7 @@ impl Workbench {
             .iter()
             .zip(prefixes)
             .zip(counts)
-            .map(|(((agent, root), (_, raw)), n)| {
+            .map(|(((agent, root, individual_default), (_, raw)), n)| {
                 // 存在性逐路径判断:某家的归档目录可能还没建,不该按整家一刀切
                 let exists = root.exists();
                 // 本行根落在同家某个自定义 location 之下 → 可移除行。
@@ -747,14 +754,19 @@ impl Workbench {
                     agent: *agent,
                     display: tilde_path(&raw).into(),
                     raw: raw.into(),
-                    tally: if exists { n.to_string().into() } else { "Not found".into() },
+                    tally: if exists {
+                        n.to_string().into()
+                    } else {
+                        "Not found".into()
+                    },
                     exists,
                     custom,
+                    individual_default: *individual_default,
                 }
             })
             .collect();
         // 有任何偏离(自定义或被移除的预设)才给 Restore defaults 出场
-        let diverged = !customs.is_empty() || !removed.is_empty();
+        let diverged = !customs.is_empty() || !removed.is_empty() || !removed_roots.is_empty();
         let entity = cx.entity();
         window.open_dialog(cx, move |dialog, _window, cx| {
             let theme = cx.theme();
@@ -800,6 +812,8 @@ impl Workbench {
                                     agent: row.agent,
                                     custom: row.custom.is_some(),
                                     path: edit_path,
+                                    root: row.raw.clone(),
+                                    individual_default: row.individual_default,
                                 };
                                 let edit_entity = entity.clone();
                                 h_flex()
@@ -1127,7 +1141,13 @@ impl Workbench {
                                 ),
                         )
                         .when_some(edit_exists, |el, exists| {
-                            let FormTarget::Edit { agent, path, custom } = action_target.clone()
+                            let FormTarget::Edit {
+                                agent,
+                                path,
+                                root,
+                                custom,
+                                individual_default,
+                            } = action_target.clone()
                             else {
                                 unreachable!("edit_exists 仅在 Edit 目标下为 Some")
                             };
@@ -1159,14 +1179,21 @@ impl Workbench {
                                             .on_click({
                                                 let remove_entity = remove_entity.clone();
                                                 let stored = custom.then(|| path.clone());
+                                                let default_root = (!custom && individual_default)
+                                                    .then(|| root.clone());
                                                 move |_, window, cx| {
                                                     // 整栈收场(表单+过期面板);
                                                     // delete 内会重开新快照面板
                                                     window.close_all_dialogs(cx);
                                                     let stored = stored.clone();
+                                                    let default_root = default_root.clone();
                                                     remove_entity.update(cx, |this, cx| {
                                                         this.delete_location(
-                                                            agent, stored, window, cx,
+                                                            agent,
+                                                            stored,
+                                                            default_root,
+                                                            window,
+                                                            cx,
                                                         )
                                                     });
                                                 }
@@ -1332,12 +1359,24 @@ impl Workbench {
                 let rs = r.to_string_lossy().to_string();
                 let excluded = match &target {
                     FormTarget::Add => false,
-                    FormTarget::Edit { agent, path: unit, custom: true } => {
-                        *agent == agent_new && path_owns(unit.as_ref(), &rs)
-                    }
-                    FormTarget::Edit { agent, custom: false, .. } => {
-                        *agent == agent_new && custom_owner(&customs, agent_new, &rs).is_none()
-                    }
+                    FormTarget::Edit {
+                        agent,
+                        path: unit,
+                        custom: true,
+                        ..
+                    } => *agent == agent_new && path_owns(unit.as_ref(), &rs),
+                    FormTarget::Edit {
+                        agent,
+                        root,
+                        custom: false,
+                        individual_default: true,
+                        ..
+                    } => *agent == agent_new && rs == root.as_ref(),
+                    FormTarget::Edit {
+                        agent,
+                        custom: false,
+                        ..
+                    } => *agent == agent_new && custom_owner(&customs, agent_new, &rs).is_none(),
                 };
                 !excluded && (path_owns(&path, &rs) || path_owns(&rs, &path))
             });
@@ -1352,9 +1391,16 @@ impl Workbench {
             FormTarget::Add => self.store.add_custom_root(agent_new.as_str(), &path),
             // 全形态单事务(含换 agent 的编辑):半程失败不得把配置改成半生效
             //(Codex review P2)
-            FormTarget::Edit { agent, path: old, custom } => self.store.replace_location(
+            FormTarget::Edit {
+                agent,
+                path: old,
+                root,
+                custom,
+                individual_default,
+            } => self.store.replace_location(
                 agent.as_str(),
                 custom.then(|| old.as_ref()),
+                (!custom && *individual_default).then(|| root.as_ref()),
                 agent_new.as_str(),
                 &path,
             ),
@@ -1374,19 +1420,21 @@ impl Workbench {
         false
     }
 
-    /// 删除一个 location(编辑表单内的 Remove):自定义 = 删记录;预设 =
-    /// 压制该家默认实例(codex 的 sessions/archived 同属一实例,成对消失)。
+    /// 删除一个 location(编辑表单内的 Remove):自定义 = 删记录;普通预设 =
+    /// 压制该家默认实例；OpenCode stable/next 预设则只压制被点中的库。
     /// 磁盘文件不动,根下会话按"不在枚举范围"出清,收藏/置顶独立留存
     fn delete_location(
         &mut self,
         agent: AgentId,
         custom: Option<SharedString>,
+        default_root: Option<SharedString>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let res = match &custom {
-            Some(stored) => self.store.remove_custom_root(agent.as_str(), stored),
-            None => self.store.add_removed_default(agent.as_str()),
+        let res = match (&custom, &default_root) {
+            (Some(stored), _) => self.store.remove_custom_root(agent.as_str(), stored),
+            (None, Some(root)) => self.store.add_removed_default_root(agent.as_str(), root),
+            (None, None) => self.store.add_removed_default(agent.as_str()),
         };
         self.apply_location_change(
             res,

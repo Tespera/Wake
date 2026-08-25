@@ -5,6 +5,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+pub type LocationOverrides = (
+    Vec<(AgentId, std::path::PathBuf)>,
+    Vec<AgentId>,
+    Vec<(AgentId, std::path::PathBuf)>,
+);
+
 const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT);
 
@@ -71,6 +77,13 @@ CREATE TABLE IF NOT EXISTS custom_roots (
 CREATE TABLE IF NOT EXISTS removed_defaults (
   agent      TEXT PRIMARY KEY,
   removed_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS removed_default_roots (
+  agent      TEXT NOT NULL,
+  path       TEXT NOT NULL,
+  removed_at INTEGER,
+  PRIMARY KEY (agent, path)
 );
 "#;
 
@@ -279,9 +292,9 @@ impl Store {
         Ok(())
     }
 
-    /// location 配置一次取齐(自定义根 + 被移除预设),解析成模型层类型;
+    /// location 配置一次取齐(自定义根 + 被移除预设/预设路径),解析成模型层类型;
     /// 未识别的 agent 名(库被降级版本写过)静默跳过。GUI 与 scan CLI 共用
-    pub fn location_overrides(&self) -> (Vec<(AgentId, std::path::PathBuf)>, Vec<AgentId>) {
+    pub fn location_overrides(&self) -> LocationOverrides {
         let customs = self
             .list_custom_roots()
             .unwrap_or_default()
@@ -294,29 +307,43 @@ impl Store {
             .into_iter()
             .filter_map(|a| AgentId::from_str(&a))
             .collect();
-        (customs, removed)
+        let removed_roots = self
+            .list_removed_default_roots()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(a, p)| AgentId::from_str(&a).map(|a| (a, std::path::PathBuf::from(p))))
+            .collect();
+        (customs, removed, removed_roots)
     }
 
     /// 编辑 location 的全形态原子写入(2026-08-24 Codex review:分开自动提交
-    /// 时第二步失败会把配置改成半生效)。旧单元:自定义 = 删记录,预设 =
-    /// 压默认;新单元一律记自定义——含换 agent 的编辑,全在一个事务里
+    /// 时第二步失败会把配置改成半生效)。旧单元:自定义 = 删记录,普通预设 =
+    /// 压整家默认,多产品库预设 = 只压该 root;新单元一律记自定义——含换
+    /// agent 的编辑,全在一个事务里
     pub fn replace_location(
         &self,
         old_agent: &str,
         old_custom_path: Option<&str>,
+        old_default_root: Option<&str>,
         new_agent: &str,
         new_path: &str,
     ) -> Result<()> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
-        match old_custom_path {
-            Some(p) => {
+        match (old_custom_path, old_default_root) {
+            (Some(p), _) => {
                 tx.execute(
                     "DELETE FROM custom_roots WHERE agent = ?1 AND path = ?2",
                     params![old_agent, p],
                 )?;
             }
-            None => {
+            (None, Some(root)) => {
+                tx.execute(
+                    "INSERT OR IGNORE INTO removed_default_roots(agent, path, removed_at) VALUES (?1, ?2, ?3)",
+                    params![old_agent, root, now_ms()],
+                )?;
+            }
+            (None, None) => {
                 tx.execute(
                     "INSERT OR IGNORE INTO removed_defaults(agent, removed_at) VALUES (?1, ?2)",
                     params![old_agent, now_ms()],
@@ -331,10 +358,14 @@ impl Store {
         Ok(())
     }
 
-    /// 恢复初始:清空全部 location 偏离(自定义 + 被移除的预设)
+    /// 恢复初始:清空全部 location 偏离(自定义 + 被移除的预设/预设路径)
     pub fn clear_location_overrides(&self) -> Result<()> {
         let conn = self.write.lock().unwrap();
-        conn.execute_batch("DELETE FROM custom_roots; DELETE FROM removed_defaults;")?;
+        conn.execute_batch(
+            "DELETE FROM custom_roots;
+             DELETE FROM removed_defaults;
+             DELETE FROM removed_default_roots;",
+        )?;
         Ok(())
     }
 
@@ -352,6 +383,26 @@ impl Store {
         conn.execute(
             "INSERT OR IGNORE INTO removed_defaults(agent, removed_at) VALUES (?1, ?2)",
             params![agent, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// 多默认根 adapter 可只压制其中一条；路径保留为构造时解析出的绝对值，
+    /// 不会因为移除 next 库而连带关掉同一 agent 的 stable 库。
+    pub fn list_removed_default_roots(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT agent, path FROM removed_default_roots ORDER BY removed_at, path",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn add_removed_default_root(&self, agent: &str, path: &str) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO removed_default_roots(agent, path, removed_at) VALUES (?1, ?2, ?3)",
+            params![agent, path, now_ms()],
         )?;
         Ok(())
     }
@@ -862,5 +913,3 @@ pub fn default_db_path() -> std::path::PathBuf {
     }
     db
 }
-
-

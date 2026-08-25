@@ -32,7 +32,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other pr
 | Copilot CLI | `~/.copilot/session-store.db` | — | — |
 | Cursor (CLI transcripts) | `~/.cursor/projects/**/agent-transcripts` | — | — |
 | OpenCode | `~/.local/share/opencode/opencode.db` | ✅ | — |
-| OpenCode 2 (`opencode2`, beta) | same DB as v1, new `session_v2` tables | ✅ | — |
+| OpenCode 2 (`opencode2`) | `~/.local/share/opencode/{opencode.db,opencode-next.db}` (`session_v2` or `session` + `session_message`); both paths are scanned | ✅ | — |
 | Kiro | `~/.kiro/sessions/cli` | ✅ | — |
 | Gemini CLI | `~/.gemini/tmp/**/chats` | — | — |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` | ✅ | — |
