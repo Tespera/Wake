@@ -9,6 +9,14 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # 本仓库的开发环境经代理推送,tag 推送被 403 拦——手动派发时由 runner 的
+  # 令牌代建 tag(gh release create 对不存在的 tag 会按 --target 顺带创建)
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.2.7); created at the dispatched ref if missing'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,8 +41,11 @@ jobs:
       # notes = CHANGELOG 里 "## [X.Y.Z]" 到下一个版本头之间的段落
       - name: Extract release notes
         shell: pwsh
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
-          $ver = $env:GITHUB_REF_NAME -replace '^v', ''
+          $tag = if ($env:TAG_INPUT) { $env:TAG_INPUT } else { $env:GITHUB_REF_NAME }
+          $ver = $tag -replace '^v', ''
           $text = Get-Content CHANGELOG.md -Raw
           $m = [regex]::Match($text, "(?s)## \[$([regex]::Escape($ver))\][^`n]*`n(.*?)(`n## \[|$)")
           $notes = if ($m.Success) { $m.Groups[1].Value.Trim() } else { '' }
@@ -44,14 +55,15 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = if ($env:TAG_INPUT) { $env:TAG_INPUT } else { $env:GITHUB_REF_NAME }
           $zip = (Get-ChildItem dist/wake-*-windows-*.zip | Select-Object -First 1).FullName
           gh release view $tag 2>$null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $zip --clobber
           } elseif ((Get-Item release-notes.md).Length -gt 0) {
-            gh release create $tag $zip --title $tag --notes-file release-notes.md
+            gh release create $tag $zip --title $tag --notes-file release-notes.md --target $env:GITHUB_SHA
           } else {
-            gh release create $tag $zip --title $tag --generate-notes
+            gh release create $tag $zip --title $tag --generate-notes --target $env:GITHUB_SHA
           }
