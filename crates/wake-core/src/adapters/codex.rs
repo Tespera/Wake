@@ -23,7 +23,7 @@ impl CodexAdapter {
         // 指向空目录的机器整家会话凭空消失(与 opencode 探库文件同一规则)
         let root = super::env_dir("CODEX_HOME")
             .filter(|p| p.join("sessions").is_dir() || p.join("archived_sessions").is_dir())
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"));
+            .unwrap_or_else(|| super::home_dir().unwrap_or_default().join(".codex"));
         Self {
             sessions_dir: root.join("sessions"),
             archived_dir: root.join("archived_sessions"),

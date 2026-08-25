@@ -71,7 +71,7 @@ fn has_v2(conn: &rusqlite::Connection) -> bool {
 /// 疑似如此)。Dock 启动的 Wake 读不到用户 shell 的 env,故两处都探、以实际
 /// 存在的那个为准
 fn db_path() -> PathBuf {
-    let default = dirs::home_dir()
+    let default = super::home_dir()
         .unwrap_or_default()
         .join(".local")
         .join("share")

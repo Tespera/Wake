@@ -28,7 +28,7 @@ pub struct ClaudeAdapter {
 
 impl ClaudeAdapter {
     pub fn new() -> Self {
-        let root = dirs::home_dir()
+        let root = super::home_dir()
             .unwrap_or_default()
             .join(".claude")
             .join("projects");

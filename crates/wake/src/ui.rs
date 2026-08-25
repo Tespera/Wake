@@ -45,11 +45,29 @@ pub const REVEAL_IN_FM: &str = if cfg!(target_os = "macos") {
     "Reveal in File Manager"
 };
 
-/// 系统回收站的平台名词(macOS 与 freedesktop 都叫 Trash,Windows 是
-/// Recycle Bin)。删除确认/成功通知/菜单项一律引用,与 wake-core
-/// windows.rs 失败文案的名词保持同一个词。
-pub const TRASH_NOUN: &str =
-    if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
+// 系统回收站的平台名词(macOS 与 freedesktop 都叫 Trash,Windows 是
+// Recycle Bin)与由它派生的三句删除文案。名词只写一次、整句由 concat!
+// 拼出:三处分别手写 cfg! 链的话,没有任何东西能拦住它们说不同的词
+// ——与 wake-core 各平台 trash_existing 的失败文案也得是同一个词。
+//
+// 全部是 &'static str 而非调用点 format!:确认框内容活在 **dialog builder
+// 闭包**里,面板开着时每帧重跑(见 show_data_sources 处那条注释),留
+// format! 在里面就是每帧堆分配。
+macro_rules! trash_copy {
+    ($noun:literal, $body:literal) => {
+        /// 删除确认框主按钮 / 更多菜单项
+        pub const MOVE_TO_TRASH: &str = concat!("Move to ", $noun);
+        /// 删除成功通知
+        pub const SESSION_TRASHED: &str = concat!("Session moved to ", $noun);
+        /// 删除确认框正文首句(冠词随名词变,故整句单列)
+        pub const TRASH_CONFIRM_BODY: &str =
+            concat!("The session file will be moved to ", $body, ". You can restore it anytime:");
+    };
+}
+#[cfg(target_os = "windows")]
+trash_copy!("Recycle Bin", "the Recycle Bin");
+#[cfg(not(target_os = "windows"))]
+trash_copy!("Trash", "Trash");
 
 /// ⌘K 面板的唯一绑定串——main.rs 的 bind_keys 与下方徽标同源,改键只动这里
 pub const SEARCH_KEYSTROKE: &str = "secondary-k";

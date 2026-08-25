@@ -51,7 +51,7 @@ Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Dro
 - Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases
 - Credential files (`auth.json` and friends) are never read
 - Zero network requests — Wake never constructs or calls an HTTP client (GPUI's dependency tree bundles one; Wake doesn't reach for it)
-- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%APPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds)
+- Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds)
 
 ## Performance
 

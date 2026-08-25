@@ -76,7 +76,7 @@ fn main() {
                 traffic_light_position: None,
             }
         };
-        cx.open_window(
+        let window = cx.open_window(
             WindowOptions {
                 titlebar: Some(titlebar),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -107,8 +107,17 @@ fn main() {
                 window.focus(&workbench.read(cx).focus_handle(cx));
                 cx.new(|cx| Root::new(workbench, window, cx))
             },
-        )
-        .expect("failed to open window");
+        );
+        // 开窗失败必须自己报:release 的 Windows 子系统没有 stderr,panic
+        // 消息无处可去,用户看到的就是任务栏闪一下然后什么都没有
+        //(GPU/驱动起不来、RDP 会话等都会走到这)。show_fatal_alert 会弹
+        // 系统对话框,并始终先往 stderr 落一份(2026-08-25 review)
+        if let Err(e) = window {
+            wake_core::services::terminal::show_fatal_alert(&format!(
+                "Wake couldn't open its window: {e}"
+            ));
+            std::process::exit(1);
+        }
         cx.activate(true);
     });
 }

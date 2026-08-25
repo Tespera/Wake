@@ -54,9 +54,15 @@ pub(crate) fn posix_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// 展示/剪贴板/启动共用的一条可执行命令(POSIX 就是实际启动串;Windows 的
-/// 对应物是 PowerShell 方言的"手动可粘"形态,见 windows.rs)
-pub(super) fn compose_command(cli: &str, args: &[String], cwd: Option<&str>) -> String {
+/// 展示/剪贴板/启动共用的一条可执行命令。POSIX 双端只有一种 shell 方言,
+/// 与宿主无关,`_term` 只为对齐 Windows 的同名接缝(那边按宿主分
+/// cmd/PowerShell 两派,见 windows.rs)
+pub(super) fn compose_command(
+    _term: super::TerminalApp,
+    cli: &str,
+    args: &[String],
+    cwd: Option<&str>,
+) -> String {
     let core = std::iter::once(cli)
         .chain(args.iter().map(|s| s.as_str()))
         .map(posix_quote)

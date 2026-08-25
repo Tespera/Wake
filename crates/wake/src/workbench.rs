@@ -959,7 +959,14 @@ impl Workbench {
             FormTarget::Add => ("Add location", "Add", AgentId::ClaudeCode, "".into()),
             FormTarget::Edit { agent, path, .. } => ("Edit location", "Save", *agent, path.clone()),
         };
-        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder("/absolute/folder/path"));
+        // 占位符须与校验规则(Path::is_absolute)同形:Windows 上没有盘符
+        // 的 `/absolute/...` 并不算绝对路径,照着占位符敲会被拒
+        let placeholder = if cfg!(target_os = "windows") {
+            r"C:\absolute\folder\path"
+        } else {
+            "/absolute/folder/path"
+        };
+        let path_input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         if !init_path.is_empty() {
             let v = init_path.clone();
             path_input.update(cx, |st, cx| st.set_value(v, window, cx));
@@ -1262,16 +1269,22 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> bool {
         let expanded = expand_tilde(raw_text.trim());
-        // 尾分隔符归一(展示与重叠判定都吃这份);裸根("/"、"C:\")剪完会
-        // 失去绝对性,原样保留。is_absolute 三端同判据——starts_with('/')
-        // 会把所有 Windows 盘符路径误拒(空串它也判 false,无需单独挡)
-        let trimmed = expanded.trim_end_matches(std::path::is_separator);
-        let path = if std::path::Path::new(trimmed).is_absolute() { trimmed } else { &expanded };
-        if !std::path::Path::new(path).is_absolute() {
+        // 绝对性先判、只判一次:is_absolute 三端同判据(starts_with('/') 会把
+        // 所有 Windows 盘符路径误拒),空串它也判 false,无需另设 is_empty 关。
+        // **必须判在剪尾之前**:`//` 剪完是空串,若拿剪后的结果去判就会退回
+        // 未剪形态放行,而旧版是拒的(2026-08-25 review)
+        if !std::path::Path::new(&expanded).is_absolute() {
             window.push_notification(Notification::warning("Enter an absolute folder path"), cx);
             return false;
         }
-        let path = path.to_string();
+        // 尾分隔符归一(展示与重叠判定都吃这份);裸根("/"、"C:\")剪完会
+        // 失去绝对性,原样保留
+        let trimmed = expanded.trim_end_matches(std::path::is_separator);
+        let path = if std::path::Path::new(trimmed).is_absolute() {
+            trimmed.to_string()
+        } else {
+            expanded.clone()
+        };
         // 各家归一化(codex:直选 sessions 树/平铺 archived 上提到家层,侧档
         // 找回)。静态分派,不依赖该家实例是否还在 roster(默认被移除时也要
         // 生效);归一化后再做无改动/重叠判定,选中默认根数据子目录会正确判"已覆盖"
@@ -1989,10 +2002,7 @@ impl Workbench {
                     if this.detail.as_ref().is_some_and(|d| d.meta.key == key) {
                         this.detail = None;
                     }
-                    window.push_notification(
-                        Notification::success(format!("Session moved to {TRASH_NOUN}")),
-                        cx,
-                    );
+                    window.push_notification(Notification::success(SESSION_TRASHED), cx);
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
                     this.refresh(window, cx);
                 }
@@ -2031,16 +2041,14 @@ impl Workbench {
                 .confirm()
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(format!("Move to {TRASH_NOUN}"))
+                        .ok_text(MOVE_TO_TRASH)
                         .ok_variant(gpui_component::button::ButtonVariant::Danger),
                 )
                 .child(
                     v_flex()
                         .gap(SPACE_SM)
                         .text_size(FONT_BODY)
-                        .child(format!(
-                            "The session file will be moved to {TRASH_NOUN}. You can restore it anytime:"
-                        ))
+                        .child(TRASH_CONFIRM_BODY)
                         .child(
                             div()
                                 .px(SPACE_SM)
@@ -2048,7 +2056,10 @@ impl Workbench {
                                 .rounded(theme.radius)
                                 .bg(theme.muted)
                                 .text_size(FONT_CAPTION)
-                                .font_family("Menlo")
+                                // 等宽走主题 token(Menlo 只有 macOS 有;
+                                // Windows 上找不到会静默回落到比例字体的
+                                // 系统 UI 字体,与其他路径 chip 不一致)
+                                .font_family(theme.mono_font_family.clone())
                                 .child(meta.file_path.clone()),
                         )
                         .when(meta.agent == AgentId::Codex, |this| {
@@ -2689,7 +2700,7 @@ impl Workbench {
                     )
                     .separator()
                     .item(
-                        PopupMenuItem::new(format!(" Move to {TRASH_NOUN}"))
+                        PopupMenuItem::new(format!(" {MOVE_TO_TRASH}"))
                             .icon(icon("icons/trash-2.svg").with_size(px(15.)))
                             .on_click(move |_, window, cx| {
                                 delete_entity.update(cx, |this, cx| {

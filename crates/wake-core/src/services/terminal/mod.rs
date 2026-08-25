@@ -166,7 +166,9 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
     };
     let cwd_ok = !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir();
     let cwd = cwd_ok.then(|| meta.project_path.as_str());
-    let command = compose_command(&cli, &args, cwd);
+    // 按用户选的宿主取方言:command 既是成功 toast 的展示面,也是失败时
+    // 塞进剪贴板的那条,必须与真正跑的一致(Windows 的 cmd 宿主方言不同)
+    let command = compose_command(term, &cli, &args, cwd);
     if requires_cwd && !cwd_ok {
         let hint = clipboard_fallback(&command);
         return ResumeOutcome {

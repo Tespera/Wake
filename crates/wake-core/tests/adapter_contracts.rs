@@ -110,6 +110,9 @@ fn setup() -> &'static TestEnv {
         )
         .expect("write dsh subagent log");
 
+        // WAKE_HOME 是 adapter 侧的统一改道开关,三端一致;HOME 仍设一份供
+        // 其他 POSIX 依赖使用(Windows 上 dirs 不看 HOME,单设它等于没设)
+        std::env::set_var("WAKE_HOME", home.path());
         std::env::set_var("HOME", home.path());
         // 测试只受这个假 HOME 支配:opencode 认 XDG_DATA_HOME、codex 认
         // CODEX_HOME,开发者或 CI 机器上设了它们,adapter 就会绕过 fixture
@@ -1297,6 +1300,30 @@ fn path_owns_boundaries() {
     assert!(path_owns("/a/store.db", "/a/store.db#42"));
     assert!(path_owns("/", "/anything/below"));
     assert!(!path_owns("/b", "/a/x"));
+    // 空根不拥有任何东西:通用分支的 strip_prefix("") 会原样返回整条路径
+    assert!(!path_owns("", "/a/x"));
+}
+
+/// path_owns 的 Windows 形态。**只能在 Windows 上跑**:`is_separator('\\')`
+/// 在 Unix 上是 false(反斜杠在那里是合法文件名字符),同一组断言在 Linux
+/// 上恒不成立——这也正是下面这个 bug 只在 Windows 上现形的原因。
+/// 卡住的是"根判据必须是自身以分隔符收尾":一度用过 `parent().is_none()`,
+/// 而 UNC 共享根在 Windows 上恰好 parent 为 None 且**不**以分隔符收尾,
+/// 于是退化成裸前缀匹配、把 agents-old 吞进 agents(2026-08-25 review)
+#[test]
+#[cfg(target_os = "windows")]
+fn path_owns_windows_shapes() {
+    use wake_core::adapters::path_owns;
+    // UNC 共享根:兄弟共享必须判在界外
+    assert!(path_owns(r"\\nas\agents", r"\\nas\agents\x.jsonl"));
+    assert!(!path_owns(r"\\nas\agents", r"\\nas\agents-old\x.jsonl"));
+    // 盘符根以分隔符收尾,一切后代在界内
+    assert!(path_owns(r"C:\", r"C:\Users\me\x.jsonl"));
+    // 反斜杠边界与 POSIX 同规
+    assert!(path_owns(r"C:\Users\me\.claude", r"C:\Users\me\.claude\p\x.jsonl"));
+    assert!(!path_owns(r"C:\Users\me\.claude", r"C:\Users\me\.claude-old\x.jsonl"));
+    // SQLite 虚拟路径
+    assert!(path_owns(r"C:\Users\me\store.db", r"C:\Users\me\store.db#42"));
 }
 
 /// 裸 Codex 数据目录按目录名保角色(2026-08-24 Codex review):独立 archived

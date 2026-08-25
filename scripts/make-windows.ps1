@@ -12,7 +12,10 @@ $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x86_64" }
+# 架构取自实际构建目标(rustc 的 host triple),不是 PowerShell 进程的架构:
+# 后者在 ARM64 机器上跑 x64 模拟壳时会报 AMD64,给 ARM64 产物贴上 x86_64 标签
+$hostTriple = (rustc -vV | Select-String '^host: (.*)$').Matches[0].Groups[1].Value
+$arch = if ($hostTriple -like "aarch64*") { "arm64" } else { "x86_64" }
 $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }
 
 cargo build --release -p wake

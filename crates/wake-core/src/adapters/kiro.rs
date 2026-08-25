@@ -17,7 +17,7 @@ pub struct KiroAdapter {
 impl KiroAdapter {
     pub fn new() -> Self {
         Self {
-            root: dirs::home_dir()
+            root: super::home_dir()
                 .unwrap_or_default()
                 .join(".kiro")
                 .join("sessions")

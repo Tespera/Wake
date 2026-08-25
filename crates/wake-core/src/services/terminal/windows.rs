@@ -69,6 +69,15 @@ impl TerminalApp {
             TerminalApp::WezTerm => "wezterm",
         }
     }
+
+    /// 此宿主自身不是 shell,得再装一个 PowerShell 会话才跑得起命令
+    /// (terminals_for 据此在没有 PowerShell 的机器上藏掉它们)
+    fn needs_powershell(&self) -> bool {
+        matches!(
+            self,
+            TerminalApp::WindowsTerminal | TerminalApp::Alacritty | TerminalApp::WezTerm
+        )
+    }
 }
 
 /// PATH × PATHEXT 纯 Rust 遍历,语义即 CreateProcess 的查找规则。不走
@@ -97,7 +106,10 @@ pub(super) fn probe_clis(missing: &[&str]) -> HashMap<String, String> {
         if pending.is_empty() {
             break;
         }
-        if dir.as_os_str().is_empty() {
+        // 相对 PATH 项(`.`、`bin`,或快捷方式 "起始位置" 带进来的)一律跳过:
+        // 缓存里的路径会直接喂给 Command::new 和用户可粘的命令串,相对项会
+        // 让两者各自解析到不同的东西(POSIX 侧同样只收 `/` 开头的结果)
+        if dir.as_os_str().is_empty() || !dir.is_absolute() {
             continue;
         }
         pending.retain(|(want, names)| {
@@ -122,29 +134,80 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// cmd 方言 quote:整体双引号包裹(Windows 文件名不允许 `"`,无内层转义
-/// 面);`%` 在引号内仍会展开是 cmd 关不掉的固有行为,路径/会话 id 命中
-/// 概率视为零。裸词直通条件比 POSIX 版多放行 `\`(盘符路径)。
+/// cmd 方言 quote:一律双引号包裹(Windows 文件名不允许 `"`,无内层转义面)。
+/// 不留裸词快路径——cmd 的引号保全规则按"整行引号个数 + 首字符是否引号"
+/// 分支,让引号数随内容浮动等于让 mangling 随机出现;定长形制配合 cmd_line
+/// 的 `call` 前缀,行首恒为裸词,规则可预测。
+///
+/// `%` 无法在此中和:命令行(非批处理)语境下 `%%` 不折叠、引号内 `^` 是
+/// 字面量,故含 `%` 的会话交由 launch_shell 拒绝走 cmd 宿主,不静默改写
 fn cmd_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_-./:\\=".contains(c))
-    {
-        return s.to_string();
-    }
     format!("\"{s}\"")
 }
 
-/// 展示/剪贴板形态 = PowerShell 方言:`Set-Location -LiteralPath 'dir';
-/// & 'cli' 'args…'`。-LiteralPath 防路径里的 `[ ]` 被当通配符;分隔用 `;`
-/// 而非 `&&`——Windows PowerShell 5.1 不认 `&&`,而 cwd 已在 mod.rs 验过
-/// 存在,cd 失败只剩竞态窗口。cmd 用户是唯一粘不动的群体,而 cmd 宿主由
-/// launch_shell 直接注入、不经剪贴板,失败兜底选覆盖面最大的方言。
-pub(super) fn compose_command(cli: &str, args: &[String], cwd: Option<&str>) -> String {
+/// cmd 方言整行。`call` 前缀让行首恒为裸词:cmd 对 `/K` 载荷有一条遗留
+/// 规则——首字符是引号且全行引号数不为二时,砍掉首尾各一个引号——路径
+/// 带空格(`C:\Program Files\…`)时整条命令会被腰斩成 `C:\Program`,而
+/// spawn 成功、Wake 照报 ok(2026-08-25 review)。`call` 对 exe 与
+/// bat/cmd 同样是同步调用,语义不变。
+/// `/d`:跨盘符 cd 也生效(会话在 D: 而 cmd 起在 C: 的情形)。
+fn cmd_line(cli: &str, args: &[String], cwd: Option<&str>) -> String {
+    let mut line = String::new();
+    if let Some(dir) = cwd {
+        line.push_str(&format!("cd /d {} && ", cmd_quote(dir)));
+    }
+    line.push_str("call ");
+    line.push_str(&cmd_quote(cli));
+    for a in args {
+        line.push(' ');
+        line.push_str(&cmd_quote(a));
+    }
+    line
+}
+
+/// cmd 宿主无法安全承载的内容:`%VAR%` 在双引号内照样展开,而命令行语境
+/// 下没有任何转义能关掉它——含 `%` 就会静默跑成另一条命令。会话 id 取自
+/// 文件名(parse_utils),用户目录更是任意,概率并非零。
+fn cmd_hostile(cli: &str, args: &[String], cwd: Option<&str>) -> bool {
+    std::iter::once(cli)
+        .chain(args.iter().map(|s| s.as_str()))
+        .chain(cwd)
+        .any(|s| s.contains('%'))
+}
+
+/// PowerShell 方言:`Set-Location -LiteralPath 'dir' -ErrorAction Stop;
+/// & 'cli' 'args…'`。-LiteralPath 防路径里的 `[ ]` 被当通配符;
+/// **-ErrorAction Stop 不可省**:Windows PowerShell 5.1 不认 `&&`,而
+/// Set-Location 默认是 non-terminating error,裸 `;` 会在 cd 失败后照样
+/// 起 agent——落进错误的工作目录且 Wake 已报成功(dsh 的 workspace 完全
+/// 由启动目录决定,后果尤重)。加了它才与 POSIX 的 `cd X && cmd`、
+/// cmd 宿主的 `cd /d X && …` 同为失败即止(2026-08-25 review)。
+fn ps_line(cli: &str, args: &[String], cwd: Option<&str>) -> String {
     let core = ps_call(cli, args);
     match cwd {
-        Some(dir) => format!("Set-Location -LiteralPath {}; {core}", ps_quote(dir)),
+        Some(dir) => format!(
+            "Set-Location -LiteralPath {} -ErrorAction Stop; {core}",
+            ps_quote(dir)
+        ),
         None => core,
+    }
+}
+
+/// 展示/剪贴板/启动共用的那一条命令,**按用户实际选的宿主取方言**。
+/// 三端共有的契约是 ResumeOutcome.command 即真正跑的那条(workbench 的
+/// 成功 toast 与失败兜底都渲染它);早先 Windows 恒给 PowerShell 形态,
+/// 于是选了 Command Prompt 的用户会拿到一条粘进 cmd 必报语法错的命令
+/// ——而失败兜底的两个触发点(cwd 不存在、spawn 失败)都在 launch_shell
+/// 之前/之外,"cmd 用户不经剪贴板"的假设不成立(2026-08-25 review)
+pub(super) fn compose_command(
+    term: TerminalApp,
+    cli: &str,
+    args: &[String],
+    cwd: Option<&str>,
+) -> String {
+    match term {
+        TerminalApp::Cmd => cmd_line(cli, args, cwd),
+        _ => ps_line(cli, args, cwd),
     }
 }
 
@@ -192,9 +255,17 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
     })
 }
 
-/// 某会话可用的恢复目标(Windows 无按 agent 过滤的目标,一律全量)
+/// 某会话可用的恢复目标。Windows 不按 agent 过滤,但 wt/Alacritty/WezTerm
+/// 只是宿主、内部还要装一个 PowerShell 会话——两个 PowerShell 都不在 PATH
+/// 时它们同样起不来,得跟着藏掉(macOS 用同一个钩子藏 Kooky)。否则用户点
+/// 下去只能拿到 "PowerShell not found" 加一条自己没有 shell 去跑的命令
 pub fn terminals_for(_agent: AgentId) -> Vec<TerminalApp> {
-    installed_terminals().to_vec()
+    let has_ps = powershell_bin().is_ok();
+    installed_terminals()
+        .iter()
+        .copied()
+        .filter(|t| has_ps || !t.needs_powershell())
+        .collect()
 }
 
 /// wt/第三方宿主内装的 shell:优先 pwsh(用户装了 7+ 就是它的默认),
@@ -224,21 +295,15 @@ pub(super) fn launch_shell(
     let mut cmd = Command::new(&exe);
     match term {
         TerminalApp::Cmd => {
-            // cmd 方言内联注入(**不得**改用 command:那是 PowerShell 方言)。
+            if cmd_hostile(cli, args, cwd) {
+                // 拒绝而非静默改写:调用方会把 command(此刻已是 cmd 方言)
+                // 送进剪贴板兜底,用户仍拿得到可手动执行的那条
+                anyhow::bail!("path or session id contains '%', which Command Prompt would expand — pick another terminal");
+            }
             // raw_arg 绕过 std 的 argv 引号规则——cmd 不做 argv 解析,std 把
-            // 整串再包一层引号反而会毁掉内层结构;串首是 `cd`/裸词而非引号,
-            // cmd 的引号保全规则生效,内层 "…" 原样送达
-            let mut line = String::from("/K ");
-            if let Some(dir) = cwd {
-                // /d:跨盘符 cd 也生效(会话在 D: 而 cmd 起在 C: 的情形)
-                line.push_str(&format!("cd /d {} && ", cmd_quote(dir)));
-            }
-            line.push_str(&cmd_quote(cli));
-            for a in args {
-                line.push(' ');
-                line.push_str(&cmd_quote(a));
-            }
-            cmd.raw_arg(line);
+            // 整串再包一层引号反而会毁掉内层结构。command 即 compose_command
+            // 给的 cmd 方言原文(见 cmd_line 的 `call` 前缀说明)
+            cmd.raw_arg(format!("/K {command}"));
         }
         TerminalApp::Pwsh | TerminalApp::WindowsPowershell => {
             cmd.args(PS_SESSION).arg(command);
@@ -290,47 +355,89 @@ pub fn ensure_app_icons(_cache_dir: &Path) -> HashMap<String, PathBuf> {
 /// Win32 剪贴板(CF_UNICODETEXT),UTF-16 直达。别家占着剪贴板时
 /// OpenClipboard 会瞬时失败(剪贴板管理器常见),小步重试几轮;仍失败
 /// 返回 false——调用方(clipboard_fallback)据此决定还敢不敢说 "copied"。
+///
+/// **必须带 owner 窗口**:OpenClipboard(NULL) 之后 EmptyClipboard 会把
+/// clipboard owner 置空,而 owner 为空时 SetClipboardData 按文档必失败
+/// ——即"清掉用户剪贴板 + 永远写不进去"。wake-core 够不到 gpui 的窗口,
+/// 故就地开一个 message-only 窗口(HWND_MESSAGE 父级,不进 z-order、不
+/// 收广播、无绘制),用完即毁。类名借系统预注册的 "STATIC",免注册。
+///
+/// 另:写入成功前不碰 EmptyClipboard——失败路径不该顺手毁掉用户已有内容。
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
     };
+    // GlobalFree 归 Foundation(windows-sys 的分模块与 MSDN 头文件不同名)
+    use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, HWND_MESSAGE,
+    };
     // windows-sys 里它归 Win32_System_Ole feature,为一个钉死的小常量不拉
     const CF_UNICODETEXT: u32 = 13;
 
-    let wide = wide(text);
-    let bytes = wide.len() * 2;
+    let wide_text = wide(text);
+    let bytes = wide_text.len() * 2;
     unsafe {
+        let class = wide("STATIC");
+        // 样式在 windows-sys 里是裸 u32(非 windows crate 的 newtype)
+        let owner = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            std::ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        if owner.is_null() {
+            return false;
+        }
         let mut opened = false;
         for _ in 0..5 {
-            if OpenClipboard(std::ptr::null_mut()) != 0 {
+            if OpenClipboard(owner) != 0 {
                 opened = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         if !opened {
+            DestroyWindow(owner);
             return false;
         }
         let ok = 'set: {
-            if EmptyClipboard() == 0 {
-                break 'set false;
-            }
+            // 先备好数据,拿到手再清——清完才发现分配不出来的话,用户
+            // 原有剪贴板就白丢了
             let hmem = GlobalAlloc(GMEM_MOVEABLE, bytes);
             if hmem.is_null() {
                 break 'set false;
             }
             let dst = GlobalLock(hmem);
             if dst.is_null() {
-                // hmem 就地泄漏:一次性小块,不为它多拉 GlobalFree 绑定
+                GlobalFree(hmem);
                 break 'set false;
             }
-            std::ptr::copy_nonoverlapping(wide.as_ptr().cast::<u8>(), dst.cast::<u8>(), bytes);
+            std::ptr::copy_nonoverlapping(wide_text.as_ptr().cast::<u8>(), dst.cast::<u8>(), bytes);
             GlobalUnlock(hmem);
+            if EmptyClipboard() == 0 {
+                GlobalFree(hmem);
+                break 'set false;
+            }
+            if SetClipboardData(CF_UNICODETEXT, hmem).is_null() {
+                // 交接失败,所有权仍在我们手上
+                GlobalFree(hmem);
+                break 'set false;
+            }
             // 成功后内存归系统所有,不得再碰
-            !SetClipboardData(CF_UNICODETEXT, hmem).is_null()
+            true
         };
         CloseClipboard();
+        DestroyWindow(owner);
         ok
     }
 }
@@ -359,11 +466,27 @@ pub(super) fn alert_dialog(message: &str) {
     }
 }
 
+/// explorer.exe 的绝对路径。裸名走 CreateProcess 查找序,而那个序列把
+/// **当前目录排在 System32 之前**——Wake 从解包目录(zip 直接解到下载夹)
+/// 启动时,旁边放一个 explorer.exe 就会被当成它执行。本文件其余 spawn 都
+/// 用 resolve_cli 给的绝对路径,这两处不能例外。
+fn explorer_exe() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    PathBuf::from(root).join("explorer.exe")
+}
+
+/// 资源管理器只认反斜杠:`/` 拼出来的路径它会当成参数解析失败、转而打开
+/// 默认视图(既不进目录也不选中)。展示层可以留用户手输的形态,交给
+/// explorer 前必须归一。
+fn win_path(path: &str) -> String {
+    path.replace('/', "\\")
+}
+
 /// 在资源管理器里进入目录(explorer 常驻单实例、前台进程即刻退出,
 /// 且退出码恒非零,spawn 成功即算送达)
 pub(super) fn open_dir(path: &str) {
-    let mut cmd = Command::new("explorer.exe");
-    cmd.arg(path);
+    let mut cmd = Command::new(explorer_exe());
+    cmd.arg(win_path(path));
     let _ = spawn_and_reap(cmd);
 }
 
@@ -371,7 +494,7 @@ pub(super) fn open_dir(path: &str) {
 /// 整体一个参数且引号形制固定——explorer 自解析命令行、不吃 argv 转义,
 /// raw_arg 原样直达。
 pub(super) fn reveal_path(path: &str) {
-    let mut cmd = Command::new("explorer.exe");
-    cmd.raw_arg(format!("/select,\"{path}\""));
+    let mut cmd = Command::new(explorer_exe());
+    cmd.raw_arg(format!("/select,\"{}\"", win_path(path)));
     let _ = spawn_and_reap(cmd);
 }

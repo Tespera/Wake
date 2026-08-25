@@ -118,6 +118,16 @@ pub(crate) fn env_dir(key: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// 各家数据根共用的 HOME。**全部 adapter 必须走这里**,不要直接
+/// `dirs::home_dir()`——`WAKE_HOME` 是整组 adapter 的统一改道开关:
+/// 契约测试靠它把十三家指向 fixture 目录,而 `dirs::home_dir()` 只在
+/// POSIX 上看 `$HOME`,Windows 上走 SHGetKnownFolderPath、无论如何都指向
+/// 真实用户目录(于是 Windows 上的契约测试全部落空,2026-08-25 review)。
+/// 对用户它顺带是便携安装/多档案切换的手动开关。
+pub(crate) fn home_dir() -> Option<std::path::PathBuf> {
+    env_dir("WAKE_HOME").or_else(dirs::home_dir)
+}
+
 /// 全量十三家 roster,**不按 detect 过滤**。这是全应用唯一的构造点:
 /// scanner/watcher/resume/Session locations 面板共享 Workbench 启动时的
 /// 同一份实例。缺根的家由各自 list_session_files 降级为 Ok(空)(scanner
@@ -186,10 +196,19 @@ pub fn create_adapters_for(store: &crate::db::Store) -> Vec<Box<dyn AgentAdapter
 /// std::path::is_separator(Windows 上 `\` 与 `/` 都算),POSIX 上行为
 /// 与旧 '/' 字面量逐位相同。
 pub fn path_owns(root: &str, path: &str) -> bool {
+    // 空根不拥有任何东西(data_roots() 里 to_string_lossy 出的空 PathBuf):
+    // 走通用分支的话 strip_prefix("") 会原样返回整条路径,于是空根拥有
+    // 一切绝对路径
+    if root.is_empty() {
+        return false;
+    }
     // 文件系统根("/"、Windows 的 "C:\"):strip_prefix 剥掉的正是分隔符
     // 本身,通用分支会把一切后代判为界外(2026-08-24 Codex review)。
-    // "根"即无父目录;空串 parent 也是 None,先挡掉,别让空根拥有一切
-    if !root.is_empty() && Path::new(root).parent().is_none() {
+    // 判据必须是"自身以分隔符收尾"而**不是** parent().is_none():后者在
+    // Windows 上对 UNC 共享根(`\\nas\agents`,components = [Prefix, RootDir])
+    // 同样为 None,而它不以分隔符收尾——裸 starts_with 会把 `\\nas\agents-old`
+    // 判为界内,正是本函数存在要防的那个 bug(2026-08-25 review)
+    if root.ends_with(std::path::is_separator) {
         return path.starts_with(root);
     }
     match path.strip_prefix(root) {

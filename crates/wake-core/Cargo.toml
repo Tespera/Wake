@@ -15,14 +15,21 @@ notify.workspace = true
 chrono.workspace = true
 zstd.workspace = true
 
-# Linux/Windows 废纸篓:freedesktop Trash spec / IFileOperation 回收站的
-# 纯库实现(macOS 走 Finder/osascript,行为已验证不动)
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+# Linux 废纸篓:freedesktop Trash spec 的纯库实现
+# (macOS 走 Finder/osascript,行为已验证不动)
+[target.'cfg(target_os = "linux")'.dependencies]
 trash = "5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows 回收站(IFileOperation)。**必须** coinit_multithreaded:trash 默认
+# 的 apartmentthreaded 会在已是 MTA 的线程上让 CoInitializeEx 返回
+# RPC_E_CHANGED_MODE,而 trash 对此是 panic! 而非 Err——delete 跑在 gpui 的
+# background_spawn 上,其 Windows 派发器用 WinRT ThreadPool(worker 恒 MTA),
+# 于是"删除到回收站"必崩,且 panic 要穿过 extern "system" 的 WinRT 委托
+trash = { version = "5", default-features = false, features = ["coinit_multithreaded", "chrono"] }
 
 # Win32 原语:MessageBox 致命弹窗、CF_UNICODETEXT 剪贴板(clip.exe 按控制台
 # codepage 解码 stdin,非 ASCII 命令必乱,不走子进程管道)、进程创建旗标
-[target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_DataExchange",

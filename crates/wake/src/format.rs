@@ -51,7 +51,12 @@ pub fn fmt_tokens(n: Option<i64>) -> String {
 fn cached_home() -> Option<&'static str> {
     static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
-        dirs::home_dir()
+        // 与 adapter 侧同一个 HOME(wake_core::adapters::home_dir 的
+        // WAKE_HOME 开关):两边不一致时,改道过的数据根不会折成 `~`
+        std::env::var_os("WAKE_HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(dirs::home_dir)
             .map(|h| h.to_string_lossy().to_string())
             .filter(|h| !h.is_empty())
     })

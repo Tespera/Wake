@@ -832,11 +832,20 @@ pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// 索引库路径:<dirs::data_dir>/wake/wake.db —— macOS 为
-/// ~/Library/Application Support,Linux 为 ~/.local/share,Windows 为
-/// %APPDATA%(从旧 vibex 路径一次性迁移,保留收藏等 user_data)
+/// 索引库路径:macOS 为 ~/Library/Application Support/wake,Linux 为
+/// ~/.local/share/wake,Windows 为 %LOCALAPPDATA%\wake
+/// (从旧 vibex 路径一次性迁移,保留收藏等 user_data)。
+///
+/// Windows 取 data_local_dir 而非 data_dir:后者是漫游 %APPDATA%,而本库
+/// 开 WAL——WAL 要 -shm 共享内存映射,重定向到网络盘的漫游目录上根本打不开
+/// (域环境 Folder Redirection 是标配),Wake 会在启动即致命退出;何况这是
+/// 可随时重建的索引,几百 MB 跟着登录/注销来回同步纯属浪费(2026-08-25 review)
 pub fn default_db_path() -> std::path::PathBuf {
-    let data = dirs::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    #[cfg(target_os = "windows")]
+    let data = dirs::data_local_dir();
+    #[cfg(not(target_os = "windows"))]
+    let data = dirs::data_dir();
+    let data = data.unwrap_or_else(|| std::path::PathBuf::from("."));
     let dir = data.join("wake");
     let db = dir.join("wake.db");
     if !db.exists() {
