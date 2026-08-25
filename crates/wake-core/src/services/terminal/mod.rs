@@ -89,7 +89,7 @@ pub fn cli_path(agent: AgentId) -> Option<String> {
     agent_bin(agent).and_then(resolve_cli)
 }
 
-/// 会话级二进制:OpenCode v2 beta 与 v1 并存、装为 `opencode2`,
+/// 会话级二进制:OpenCode 2 next preview 与 stable 并存、装为 `opencode2`,
 /// v2 会话(source = "opencode2")必须由它恢复,其余会话走 agent 默认 bin
 fn session_bin(meta: &SessionMeta) -> Option<&'static str> {
     if meta.agent == AgentId::Opencode && meta.source.as_deref() == Some("opencode2") {

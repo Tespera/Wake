@@ -1,23 +1,27 @@
 use super::parse_utils::*;
-use super::sqlite_ro::{open_sqlite_ro, virtual_path, SqliteRo};
+use super::sqlite_ro::{open_sqlite_ro, strip_virtual_path, virtual_path, SqliteRo};
 use super::{units_from_messages, AgentAdapter};
 use crate::models::*;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// OpenCode:`~/.local/share/opencode/opencode.db`,v1 与 v2 beta 共库不同表。
+/// OpenCode stable:`~/.local/share/opencode/opencode.db`;OpenCode 2 next 渠道
+/// 另用同目录的 `opencode-next.db`。两库可同时存在,必须并行扫描而不是二选一。
+///
 /// v1:session 表 + 正文在 part 表({type:text|reasoning|tool},synthetic=注入),
-/// message 表只有角色与时间。v2(binary `opencode2`):session_v2 表 + 正文在
-/// session_message 表(type 列 user|synthetic|assistant,data JSON——user 的
-/// text 在顶层,assistant 的 content 是块数组)。v2 首次启动会把 v1 会话迁移进
-/// session_v2(version 列保留原 CLI 版本),因此 v2 表是全集;仅存于 v1 表的
-/// 会话(迁移后又用 v1 CLI 跑的)由 UNION 回捞。parent_id 非空 = 子代理,不进列表。
+/// message 表只有角色与时间。OpenCode 2(binary `opencode2`)的真实 next schema
+/// 仍用 session 表,正文改放 session_message(type 列
+/// user|synthetic|assistant,data JSON)。早期 preview 曾用 session_v2 表,这里也
+/// 保持兼容。parent_id 非空 = 子代理,不进列表。
 pub struct OpencodeAdapter {
-    db: PathBuf,
-    /// rows() 带按会话相关子查询(全 part/message 表求和),按 db mtime 缓存
-    /// 一轮扫描内的重复调用
+    dbs: Vec<OcDb>,
+}
+
+struct OcDb {
+    path: PathBuf,
+    /// 元数据查询带全表相关子查询,按各库 mtime 分别缓存一轮扫描内的重复调用
     rows_cache: MtimeCache<Vec<OcRow>>,
 }
 
@@ -26,20 +30,89 @@ const ROW_COLS: &str = "s.id, s.directory, s.title, s.time_created, s.time_updat
         s.model, s.tokens_input + s.tokens_output + s.tokens_reasoning,
         s.time_archived, s.version";
 
-fn v1_select() -> String {
+fn select_from(table: &str, content_len: &str, v2_messages: &str) -> String {
     format!(
-        "SELECT {ROW_COLS},
-            (SELECT COALESCE(SUM(LENGTH(p.data)), 0) FROM part p WHERE p.session_id = s.id)
-         FROM session s"
+        "SELECT {ROW_COLS}, {content_len} AS content_len,
+                {v2_messages} AS v2_messages
+         FROM {table} s"
     )
 }
 
-fn v2_select() -> String {
-    format!(
-        "SELECT {ROW_COLS},
-            (SELECT COALESCE(SUM(LENGTH(m.data)), 0) FROM session_message m WHERE m.session_id = s.id)
-         FROM session_v2 s"
+fn has_table(conn: &rusqlite::Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |_| Ok(()),
     )
+    .is_ok()
+}
+
+/// 根据库内真实表组合生成一次枚举 SQL。新版 next 与 v1 共用 session 表,
+/// 所以必须逐会话看 session_message 是否有正文;仅检查 session_v2 会把真实
+/// next 会话误走 part 路径并以 content_len=0 全部过滤(GitHub #2)。
+fn rows_sql(conn: &rusqlite::Connection) -> Option<String> {
+    let has_session = has_table(conn, "session");
+    let has_session_v2 = has_table(conn, "session_v2");
+    let has_parts = has_table(conn, "part");
+    let has_messages_v2 = has_table(conn, "session_message");
+    if !has_session && !has_session_v2 {
+        return None;
+    }
+
+    let part_len = "(SELECT COALESCE(SUM(LENGTH(p.data)), 0) FROM part p \
+                    WHERE p.session_id = s.id)";
+    let message_len = "(SELECT COALESCE(SUM(LENGTH(m.data)), 0) FROM session_message m \
+                       WHERE m.session_id = s.id)";
+    let message_exists = "EXISTS(SELECT 1 FROM session_message m WHERE m.session_id = s.id)";
+    let mut selects = Vec::new();
+
+    // 早期 preview schema:session_v2 是全集,session 仅作 v1 回捞。
+    if has_session_v2 {
+        let len = if has_messages_v2 { message_len } else { "0" };
+        selects.push(format!(
+            "{} WHERE s.parent_id IS NULL",
+            select_from("session_v2", len, "1")
+        ));
+    }
+
+    if has_session {
+        let (len, v2) = match (has_parts, has_messages_v2) {
+            (true, true) => (
+                format!("CASE WHEN {message_exists} THEN {message_len} ELSE {part_len} END"),
+                format!("CASE WHEN {message_exists} THEN 1 ELSE 0 END"),
+            ),
+            (true, false) => (part_len.to_string(), "0".to_string()),
+            (false, true) => (message_len.to_string(), "1".to_string()),
+            (false, false) => ("0".to_string(), "0".to_string()),
+        };
+        let mut sql = format!(
+            "{} WHERE s.parent_id IS NULL",
+            select_from("session", &len, &v2)
+        );
+        if has_session_v2 {
+            sql.push_str(" AND s.id NOT IN (SELECT id FROM session_v2)");
+        }
+        selects.push(sql);
+    }
+    Some(selects.join(" UNION ALL "))
+}
+
+fn query_rows(conn: &rusqlite::Connection, id: Option<&str>) -> Result<Vec<OcRow>> {
+    let sql = rows_sql(conn).ok_or_else(|| anyhow!("opencode database has no session table"))?;
+    let sql = match id {
+        Some(_) => format!("SELECT * FROM ({sql}) WHERE id = ?1"),
+        None => sql,
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = match id {
+        Some(id) => stmt
+            .query_map([id], row_from)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        None => stmt
+            .query_map([], row_from)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    };
+    Ok(rows)
 }
 
 fn row_from(r: &rusqlite::Row) -> rusqlite::Result<OcRow> {
@@ -54,73 +127,119 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<OcRow> {
         archived: r.get::<_, Option<i64>>(7)?.is_some(),
         version: r.get::<_, Option<String>>(8)?.unwrap_or_default(),
         content_len: r.get(9)?,
+        v2_messages: r.get::<_, i64>(10)? != 0,
     })
 }
 
-fn has_v2(conn: &rusqlite::Connection) -> bool {
-    conn.query_row(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
-        [],
-        |_| Ok(()),
-    )
-    .is_ok()
+impl OcDb {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            rows_cache: MtimeCache::new(),
+        }
+    }
 }
 
-/// opencode 走 XDG 规范——二进制里就是 `process.env.XDG_DATA_HOME ||
-/// ~/.local/share`。设过这个变量的机器,库根本不在默认位置(GitHub #2 的现场
-/// 疑似如此)。Dock 启动的 Wake 读不到用户 shell 的 env,故两处都探、以实际
-/// 存在的那个为准
-fn db_path() -> PathBuf {
-    let default = dirs::home_dir()
+fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.contains(&path) {
+        paths.push(path);
+    }
+}
+
+fn known_db_paths(dir: &Path) -> Vec<PathBuf> {
+    vec![dir.join("opencode.db"), dir.join("opencode-next.db")]
+}
+
+/// OpenCode 的数据目录服从 XDG;next 渠道另命名数据库而非替换 stable 库。
+/// 两个固定候选都常驻 roster,这样 Wake 启动后才安装任一 CLI,普通刷新也能发现。
+/// OPENCODE_DB 若被 GUI 进程继承则作为额外候选,但绝不压掉两个标准位置。
+fn default_db_paths() -> Vec<PathBuf> {
+    let default_dir = dirs::home_dir()
         .unwrap_or_default()
         .join(".local")
         .join("share")
-        .join("opencode")
-        .join("opencode.db");
-    super::env_dir("XDG_DATA_HOME")
-        .map(|x| x.join("opencode").join("opencode.db"))
-        .filter(|p| p.is_file())
-        .unwrap_or(default)
+        .join("opencode");
+    let xdg_dir = super::env_dir("XDG_DATA_HOME").map(|x| x.join("opencode"));
+    let active_dir = xdg_dir
+        .as_ref()
+        .filter(|dir| known_db_paths(dir).iter().any(|p| p.is_file()))
+        .unwrap_or(&default_dir);
+
+    let mut paths = Vec::new();
+    if let Some(value) = std::env::var_os("OPENCODE_DB").filter(|v| !v.is_empty()) {
+        let configured = PathBuf::from(value);
+        if configured != Path::new(":memory:") {
+            let configured = if configured.is_absolute() {
+                configured
+            } else {
+                active_dir.join(configured)
+            };
+            if configured.is_file() {
+                push_unique(&mut paths, configured);
+            }
+        }
+    }
+    for path in known_db_paths(active_dir) {
+        push_unique(&mut paths, path);
+    }
+    // XDG 位置被采信时,默认目录里已有的库仍是只读候选,避免稳定版历史消失。
+    if active_dir != &default_dir {
+        for path in known_db_paths(&default_dir)
+            .into_iter()
+            .filter(|p| p.is_file())
+        {
+            push_unique(&mut paths, path);
+        }
+    }
+    paths
+}
+
+fn custom_db_paths(dir: PathBuf) -> Vec<PathBuf> {
+    if dir.is_file() {
+        return vec![dir];
+    }
+    let nested = dir.join("opencode");
+    let db_dir = if nested.is_dir() || known_db_paths(&nested).iter().any(|p| p.is_file()) {
+        nested
+    } else {
+        dir
+    };
+    known_db_paths(&db_dir)
 }
 
 impl OpencodeAdapter {
     pub fn new() -> Self {
         Self {
-            db: db_path(),
-            rows_cache: MtimeCache::new(),
+            dbs: default_db_paths().into_iter().map(OcDb::new).collect(),
         }
     }
 
-    fn open(&self) -> Option<SqliteRo> {
-        open_sqlite_ro(&self.db, "opencode")
+    fn open(db: &Path) -> Option<SqliteRo> {
+        open_sqlite_ro(db, "opencode")
     }
 
-    fn rows(&self) -> Option<Vec<OcRow>> {
-        let mtime = std::fs::metadata(&self.db).map(|m| mtime_ms(&m)).unwrap_or(0);
-        self.rows_cache.get_or_try_build(mtime, || {
-            let ro = self.open()?;
-            let sql = if has_v2(&ro.conn) {
-                format!(
-                    "{} WHERE s.parent_id IS NULL \
-                     UNION ALL \
-                     {} WHERE s.parent_id IS NULL AND s.id NOT IN (SELECT id FROM session_v2)",
-                    v2_select(),
-                    v1_select()
-                )
-            } else {
-                format!("{} WHERE s.parent_id IS NULL", v1_select())
-            };
-            let mut stmt = ro.conn.prepare(&sql).ok()?;
-            let rows = stmt
-                .query_map([], row_from)
-                .ok()?
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .ok()?;
-            Some(rows)
+    fn rows(db: &OcDb) -> Option<Vec<OcRow>> {
+        let mtime = std::fs::metadata(&db.path)
+            .map(|m| mtime_ms(&m))
+            .unwrap_or(0);
+        db.rows_cache.get_or_try_build(mtime, || {
+            let ro = Self::open(&db.path)?;
+            query_rows(&ro.conn, None).ok()
         })
     }
 
-    fn build_meta(&self, r: &SessionFileRef, row: &OcRow, message_count: i64) -> SessionMeta {
+    fn db_for_ref(&self, r: &SessionFileRef) -> Option<&OcDb> {
+        let db_path = Path::new(strip_virtual_path(&r.file_path));
+        self.dbs.iter().find(|db| db.path == db_path)
+    }
+
+    fn build_meta(
+        &self,
+        r: &SessionFileRef,
+        row: &OcRow,
+        db: &Path,
+        message_count: i64,
+    ) -> SessionMeta {
         let title = clean_title_candidate(&row.title);
         let model = serde_json::from_str::<Value>(&row.model_json)
             .ok()
@@ -129,19 +248,35 @@ impl OpencodeAdapter {
             key: format!("opencode:{}", row.id),
             id: row.id.clone(),
             agent: AgentId::Opencode,
-            title: if title.is_empty() { UNTITLED.to_string() } else { title },
+            title: if title.is_empty() {
+                UNTITLED.to_string()
+            } else {
+                title
+            },
             project_path: row.directory.clone(),
             project_name: project_name_of(&row.directory),
             file_path: r.file_path.clone(),
-            created_at: if row.created_ms > 0 { row.created_ms } else { r.mtime_ms },
-            updated_at: if row.updated_ms > 0 { row.updated_ms } else { r.mtime_ms },
+            created_at: if row.created_ms > 0 {
+                row.created_ms
+            } else {
+                r.mtime_ms
+            },
+            updated_at: if row.updated_ms > 0 {
+                row.updated_ms
+            } else {
+                r.mtime_ms
+            },
             message_count,
             size_bytes: r.size,
             git_branch: None,
             model,
-            tokens_used: if row.tokens > 0 { Some(row.tokens) } else { None },
+            tokens_used: if row.tokens > 0 {
+                Some(row.tokens)
+            } else {
+                None
+            },
             archived: row.archived,
-            source: row.source(),
+            source: row.source(db),
             favorite: false,
             pinned: false,
         }
@@ -150,30 +285,23 @@ impl OpencodeAdapter {
     /// 单会话解析:一次连接;v2 行命中走 session_message,否则回落 v1 的
     /// message + part 两表路径
     fn parse(&self, r: &SessionFileRef) -> Result<(SessionMeta, Vec<TranscriptMessage>, u32)> {
-        let ro = self.open().ok_or_else(|| anyhow!("cannot open opencode db"))?;
-        let v2_row = if has_v2(&ro.conn) {
-            ro.conn
-                .query_row(&format!("{} WHERE s.id = ?1", v2_select()), [&r.native_id], row_from)
-                .ok()
-        } else {
-            None
+        let db = self
+            .db_for_ref(r)
+            .ok_or_else(|| anyhow!("opencode database is outside adapter roots"))?;
+        let ro = Self::open(&db.path).ok_or_else(|| anyhow!("cannot open opencode db"))?;
+        let row = query_rows(&ro.conn, Some(&r.native_id))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("opencode session {} not in db", r.native_id))?;
+        let (messages, unknown) = match row.v2_messages {
+            true => parse_v2_messages(&ro, &r.native_id)?,
+            false => parse_v1_messages(&ro, &r.native_id)?,
         };
-        let (row, messages, unknown) = match v2_row {
-            Some(row) => {
-                let (messages, unknown) = parse_v2_messages(&ro, &r.native_id)?;
-                (row, messages, unknown)
-            }
-            None => {
-                let row = ro
-                    .conn
-                    .query_row(&format!("{} WHERE s.id = ?1", v1_select()), [&r.native_id], row_from)
-                    .map_err(|_| anyhow!("opencode session {} not in db", r.native_id))?;
-                let (messages, unknown) = parse_v1_messages(&ro, &r.native_id)?;
-                (row, messages, unknown)
-            }
-        };
-        let count = messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64;
-        let meta = self.build_meta(r, &row, count);
+        let count = messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64;
+        let meta = self.build_meta(r, &row, &db.path, count);
         Ok((meta, messages, unknown))
     }
 }
@@ -198,9 +326,9 @@ fn parse_v1_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
 
     let mut messages: Vec<TranscriptMessage> = Vec::new();
     let mut unknown = 0u32;
-    let mut stmt = ro.conn.prepare(
-        "SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id",
-    )?;
+    let mut stmt = ro
+        .conn
+        .prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created, id")?;
     let msg_rows = stmt.query_map([sid], |m| {
         Ok((m.get::<_, String>(0)?, m.get::<_, String>(1)?))
     })?;
@@ -235,8 +363,8 @@ fn parse_v1_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
                 }
                 Some("reasoning") => acc.push_reasoning(&p),
                 Some("tool") => acc.push_tool(&p),
-                Some("step-start") | Some("step-finish") | Some("snapshot")
-                | Some("patch") | Some("file") => {}
+                Some("step-start") | Some("step-finish") | Some("snapshot") | Some("patch")
+                | Some("file") => {}
                 _ => unknown += 1,
             }
         }
@@ -285,13 +413,49 @@ fn parse_v2_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
                     messages.push(m);
                 }
             }
+            "system" => {
+                let text = md.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if !text.is_empty() {
+                    let mut m = text_msg(Role::System, text, ts);
+                    m.kind = MessageKind::Meta;
+                    messages.push(m);
+                }
+            }
+            "shell" => {
+                let command = md.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let input = serde_json::json!({ "command": command });
+                let output = md
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let mut acc = BlockAcc::default();
+                acc.tools.push(tool_call_view(
+                    md.get("callID")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    "shell",
+                    &input,
+                    output,
+                    false,
+                ));
+                if let Some(m) = acc.into_message(Role::Assistant, ts, None) {
+                    messages.push(m);
+                }
+            }
             "assistant" => {
                 let model = md
                     .pointer("/model/id")
                     .and_then(|v| v.as_str())
                     .map(String::from);
                 let mut acc = BlockAcc::default();
-                for b in md.get("content").and_then(|c| c.as_array()).into_iter().flatten() {
+                for b in md
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                {
                     match b.get("type").and_then(|v| v.as_str()) {
                         Some("text") => {
                             if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
@@ -311,6 +475,20 @@ fn parse_v2_messages(ro: &SqliteRo, sid: &str) -> Result<(Vec<TranscriptMessage>
                     messages.push(m);
                 }
             }
+            "compaction" => {
+                let summary = md
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if !summary.is_empty() {
+                    let mut m = text_msg(Role::System, summary, ts);
+                    m.kind = MessageKind::CompactSummary;
+                    messages.push(m);
+                }
+            }
+            // 纯状态切换不形成对话消息,但它们是已知 schema,不计未知行。
+            "agent-switched" | "model-switched" => {}
             _ => unknown += 1,
         }
     }
@@ -336,18 +514,23 @@ impl BlockAcc {
         }
     }
 
-    /// tool 块(两代同构):{callID,tool,state:{status,input,output}}
+    /// tool 块兼容两种形态:
+    /// preview 早期 `{callID,tool,state:{input,output}}` 与真实 next
+    /// `{id,name,state:{input,content,result,error}}`。
     fn push_tool(&mut self, b: &Value) {
         let state = b.get("state").cloned().unwrap_or(Value::Null);
         let input = state.get("input").cloned().unwrap_or(Value::Null);
-        let output = match state.get("output") {
-            Some(Value::String(s)) => Some(s.clone()),
-            Some(v) if !v.is_null() => serde_json::to_string(v).ok(),
-            _ => None,
-        };
+        let output = opencode_tool_output(&state);
         self.tools.push(tool_call_view(
-            b.get("callID").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            b.get("tool").and_then(|v| v.as_str()).unwrap_or("tool"),
+            b.get("callID")
+                .or_else(|| b.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            b.get("tool")
+                .or_else(|| b.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("tool"),
             &input,
             output,
             state.get("status").and_then(|v| v.as_str()) == Some("error"),
@@ -383,6 +566,45 @@ impl BlockAcc {
     }
 }
 
+fn opencode_tool_output(state: &Value) -> Option<String> {
+    if let Some(output) = state.get("output") {
+        return match output {
+            Value::String(s) if !s.is_empty() => Some(s.clone()),
+            v if !v.is_null() => serde_json::to_string(v).ok(),
+            _ => None,
+        };
+    }
+    if let Some(content) = state.get("content").and_then(|v| v.as_array()) {
+        let rendered = content
+            .iter()
+            .filter_map(|item| match item.get("type").and_then(|v| v.as_str()) {
+                Some("text") => item.get("text").and_then(|v| v.as_str()).map(String::from),
+                Some("file") => item
+                    .get("name")
+                    .or_else(|| item.get("uri"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| format!("[file: {s}]")),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !rendered.is_empty() {
+            return Some(rendered);
+        }
+    }
+    if let Some(result) = state.get("result").filter(|v| !v.is_null()) {
+        return match result {
+            Value::String(s) => Some(s.clone()),
+            v => serde_json::to_string(v).ok(),
+        };
+    }
+    state
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 #[derive(Clone)]
 struct OcRow {
     id: String,
@@ -396,13 +618,19 @@ struct OcRow {
     /// 会话产生时的 CLI 版本("1.14.50" / "0.0.0-beta-17639"),v2 迁移保留原值
     version: String,
     content_len: i64,
+    /// 这条会话的正文实际来自 session_message,而不是旧 message + part。
+    v2_messages: bool,
 }
 
 impl OcRow {
-    /// v2 会话在 UI 标 "opencode2"(官方产品名 OpenCode 2,binary 同名),
-    /// resume 据此换 opencode2 二进制;1.x/0.x 老版本不标
-    fn source(&self) -> Option<String> {
-        let v2 = self.version.starts_with('2') || self.version.contains("beta");
+    /// preview 会话在 UI 标 "opencode2",resume 据此换二进制。next 库名本身
+    /// 是最强信号;共享库/早期 schema 则回看写入 session.version 的渠道标记。
+    fn source(&self, db: &Path) -> Option<String> {
+        let next_db = db.file_name().and_then(|n| n.to_str()) == Some("opencode-next.db");
+        let v2 = next_db
+            || self.version.starts_with('2')
+            || self.version.contains("beta")
+            || self.version.contains("next");
         v2.then(|| "opencode2".to_string())
     }
 }
@@ -413,32 +641,42 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
-        let Some(rows) = self.rows() else {
-            return Ok(Vec::new());
-        };
-        Ok(rows
-            .into_iter()
-            .filter(|row| row.content_len > 0)
-            .map(|row| SessionFileRef {
-                agent: AgentId::Opencode,
-                native_id: row.id.clone(),
-                file_path: virtual_path(&self.db, &row.id),
-                mtime_ms: row.updated_ms,
-                size: row.content_len,
-            })
-            .collect())
+        let mut out = Vec::new();
+        for db in &self.dbs {
+            let Some(rows) = Self::rows(db) else { continue };
+            out.extend(
+                rows.into_iter()
+                    .filter(|row| row.content_len > 0)
+                    .map(|row| SessionFileRef {
+                        agent: AgentId::Opencode,
+                        native_id: row.id.clone(),
+                        file_path: virtual_path(&db.path, &row.id),
+                        mtime_ms: row.updated_ms,
+                        size: row.content_len,
+                    }),
+            );
+        }
+        Ok(out)
     }
 
     fn quick_meta(&self, refs: &[SessionFileRef]) -> Option<HashMap<String, SessionMeta>> {
-        let rows = self.rows()?;
-        let by_id: HashMap<&str, &OcRow> = rows.iter().map(|r| (r.id.as_str(), r)).collect();
         let mut out = HashMap::new();
-        for r in refs {
-            if let Some(row) = by_id.get(r.native_id.as_str()) {
-                out.insert(r.file_path.clone(), self.build_meta(r, row, 0));
+        let mut opened = false;
+        for db in &self.dbs {
+            let Some(rows) = Self::rows(db) else { continue };
+            opened = true;
+            let by_id: HashMap<&str, &OcRow> =
+                rows.iter().map(|row| (row.id.as_str(), row)).collect();
+            for r in refs
+                .iter()
+                .filter(|r| Path::new(strip_virtual_path(&r.file_path)) == db.path.as_path())
+            {
+                if let Some(row) = by_id.get(r.native_id.as_str()) {
+                    out.insert(r.file_path.clone(), self.build_meta(r, row, &db.path, 0));
+                }
             }
         }
-        Some(out)
+        opened.then_some(out)
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
@@ -462,23 +700,29 @@ impl AgentAdapter for OpencodeAdapter {
     }
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
-        // 选中 XDG 数据根(含 opencode/)、opencode 目录本身,或直接给到
-        // 库文件路径都认(Codex review:预设行编辑值曾把文件当目录拼)
-        let nested = dir.join("opencode").join("opencode.db");
-        let db = if dir.is_file() {
-            dir
-        } else if nested.is_file() {
-            nested
-        } else {
-            dir.join("opencode.db")
-        };
+        // 目录 location 同时扫描 stable + next,直接给库文件则只认该文件。
+        // 选中 XDG data 根或 opencode 目录本身都可归一化。
         Box::new(Self {
-            db,
-            rows_cache: MtimeCache::new(),
+            dbs: custom_db_paths(dir).into_iter().map(OcDb::new).collect(),
         })
     }
 
     fn data_roots(&self) -> Vec<PathBuf> {
-        vec![self.db.clone()]
+        self.dbs.iter().map(|db| db.path.clone()).collect()
+    }
+
+    fn supports_individual_root_removal(&self) -> bool {
+        true
+    }
+
+    fn excluding_data_roots(&self, roots: &[PathBuf]) -> Option<Box<dyn AgentAdapter>> {
+        Some(Box::new(Self {
+            dbs: self
+                .dbs
+                .iter()
+                .filter(|db| !roots.contains(&db.path))
+                .map(|db| OcDb::new(db.path.clone()))
+                .collect(),
+        }))
     }
 }

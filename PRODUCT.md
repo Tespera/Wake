@@ -30,7 +30,7 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 已实现:十三家 adapter、FTS5 trigram 搜索(<3 码点 LIKE 降级)、**搜索跳转定位**(2026-08-18:⌘K 命中直达详情页对应消息并高亮,seq 契约保证)、详情页逐消息渲染(气泡/工具折叠簇/thinking/tree-sitter 高亮;2026-08-17 由整篇 markdown 方案升级)、恢复/收藏/置顶/导出/删除(废纸篓+墓碑)、文件监听增量、测试套件(wake-core 27 测试 + CI + pre-commit,合成 fixture)。
 约束:对 agent 数据目录只读;绝不写 Codex 的 SQLite;不读凭证;GPUI 无 SF Symbols(图标用 lucide SVG 自备)。
-已支持十三家 agent:Claude Code、Codex、Copilot CLI、Cursor(CLI transcripts)、OpenCode(含 OpenCode 2 beta,2026-08-20 同 adapter 双表支持,v2 会话标 opencode2 徽章)、Kiro、Gemini CLI(2026-08-17 P1 五家落地)+ Pi、Oh My Pi、Grok Build、Kimi Code、Antigravity CLI(2026-08-19 对齐 kooky 内置 roster;Antigravity 正文加密仅元数据卡片)+ DeepSeek Harness(dsh,2026-08-20,zstd 事件日志透明解压;格式由源码推断,当天用户跑出真实会话完成首验)。做不了的:Cursor IDE chats 正文加密,Windsurf/Trae 加密,Amp/Factory(Droid)/Warp 云端无本地数据,Reasonix 本机零会话格式未实测。
+已支持十三家 agent:Claude Code、Codex、Copilot CLI、Cursor(CLI transcripts)、OpenCode(含 OpenCode 2 next,stable 的 `opencode.db` 与 next 的 `opencode-next.db` 同时扫描;逐会话兼容 `message+part`、真实 `session+session_message` 及早期 `session_v2` schema;preview 会话标 opencode2 徽章)、Kiro、Gemini CLI(2026-08-17 P1 五家落地)+ Pi、Oh My Pi、Grok Build、Kimi Code、Antigravity CLI(2026-08-19 对齐 kooky 内置 roster;Antigravity 正文加密仅元数据卡片)+ DeepSeek Harness(dsh,2026-08-20,zstd 事件日志透明解压;格式由源码推断,当天用户跑出真实会话完成首验)。做不了的:Cursor IDE chats 正文加密,Windsurf/Trae 加密,Amp/Factory(Droid)/Warp 云端无本地数据,Reasonix 本机零会话格式未实测。
 
 ## Brand Commitments
 

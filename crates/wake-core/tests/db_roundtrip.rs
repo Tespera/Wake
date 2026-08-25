@@ -192,11 +192,26 @@ fn custom_roots_roundtrip() {
     // 预设移除是按 agent 压制,幂等
     store.add_removed_default("codex").unwrap();
     store.add_removed_default("codex").unwrap();
-    assert_eq!(store.list_removed_defaults().unwrap(), vec!["codex".to_string()]);
+    assert_eq!(
+        store.list_removed_defaults().unwrap(),
+        vec!["codex".to_string()]
+    );
+    store
+        .add_removed_default_root("opencode", "/tmp/opencode-next.db")
+        .unwrap();
+    store
+        .add_removed_default_root("opencode", "/tmp/opencode-next.db")
+        .unwrap();
+    assert_eq!(
+        store.list_removed_default_roots().unwrap(),
+        vec![("opencode".to_string(), "/tmp/opencode-next.db".to_string())]
+    );
 
     // 编辑的原子替换:自定义换路径 / 预设改自定义 / 换 agent,全走单事务
     store.add_custom_root("grok", "/tmp/g1").unwrap();
-    store.replace_location("grok", Some("/tmp/g1"), "grok", "/tmp/g2").unwrap();
+    store
+        .replace_location("grok", Some("/tmp/g1"), None, "grok", "/tmp/g2")
+        .unwrap();
     assert_eq!(
         store.list_custom_roots().unwrap(),
         vec![
@@ -204,9 +219,29 @@ fn custom_roots_roundtrip() {
             ("grok".to_string(), "/tmp/g2".to_string()),
         ]
     );
-    store.replace_location("kiro", None, "kiro", "/tmp/k").unwrap();
-    assert!(store.list_removed_defaults().unwrap().contains(&"kiro".to_string()));
-    store.replace_location("grok", Some("/tmp/g2"), "cursor", "/tmp/cur").unwrap();
+    store
+        .replace_location("kiro", None, None, "kiro", "/tmp/k")
+        .unwrap();
+    assert!(store
+        .list_removed_defaults()
+        .unwrap()
+        .contains(&"kiro".to_string()));
+    store
+        .replace_location(
+            "opencode",
+            None,
+            Some("/tmp/opencode.db"),
+            "opencode",
+            "/tmp/opencode-copy",
+        )
+        .unwrap();
+    assert!(store
+        .list_removed_default_roots()
+        .unwrap()
+        .contains(&("opencode".to_string(), "/tmp/opencode.db".to_string())));
+    store
+        .replace_location("grok", Some("/tmp/g2"), None, "cursor", "/tmp/cur")
+        .unwrap();
     let roots = store.list_custom_roots().unwrap();
     assert!(roots.iter().any(|(a, p)| a == "cursor" && p == "/tmp/cur"));
     assert!(!roots.iter().any(|(a, _)| a == "grok"));
@@ -216,6 +251,7 @@ fn custom_roots_roundtrip() {
     store.clear_location_overrides().unwrap();
     assert!(store.list_custom_roots().unwrap().is_empty());
     assert!(store.list_removed_defaults().unwrap().is_empty());
+    assert!(store.list_removed_default_roots().unwrap().is_empty());
 }
 
 /// 增量写入的胜者裁决在写事务内:败方副本(旧 mtime、异路径)一字不写,

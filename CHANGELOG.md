@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: OpenCode 2 next-channel sessions are discovered in `opencode-next.db` and parsed from the real `session` + `session_message` schema, while the original `opencode.db` path remains enabled and can be managed independently
+
 ## [0.2.5] — 2026-08-25
 
 - New: experimental Linux support — browse, search and resume sessions on Linux desktops; prebuilt arm64 packages (.deb and tar.gz) attached to the release
