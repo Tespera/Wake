@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7] — 2026-08-25
+
+- New: experimental Windows support — browse, search and resume sessions on Windows desktops; build from source with `scripts/make-windows.ps1`, or grab a prebuilt zip from the manual "Windows artifact" workflow
+- New: on Windows, resume opens sessions in Windows Terminal, PowerShell, Windows PowerShell, Command Prompt, Alacritty or WezTerm; deleted sessions go to the Recycle Bin
+- New: `WAKE_HOME` environment variable redirects where Wake looks for agent data (portable installs and testing)
+- Update: platform-correct wording and paths throughout — File Explorer / Recycle Bin naming, drive-letter paths in Session locations, Wake's index in `%LOCALAPPDATA%\wake` on Windows
+
 ## [0.2.6] — 2026-08-25
 
 - Fix: OpenCode 2 next-channel sessions are discovered in `opencode-next.db` and parsed from the real `session` + `session_message` schema, while the original `opencode.db` path remains enabled
