@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS removed_default_roots (
   removed_at INTEGER,
   PRIMARY KEY (agent, path)
 );
+
+CREATE TABLE IF NOT EXISTS disabled_locations (
+  agent       TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  disabled_at INTEGER,
+  PRIMARY KEY (agent, path)
+);
 "#;
 
 fn open_conn(path: &Path) -> Result<Connection> {
@@ -105,7 +112,7 @@ fn open_conn(path: &Path) -> Result<Connection> {
 
 /// 打开索引库;打不开就把它连同 WAL/SHM 一起挪到 `.corrupt` 旁路再建一个空的。
 /// 索引本来就能从磁盘全量重扫恢复,重建的真实损失只有 user_data(收藏/置顶)
-/// 与 custom_roots(自定义 location)——而它远好过 GUI 无提示秒退。
+/// 与 location 配置——而它远好过 GUI 无提示秒退。
 /// 返回的 `Some(_)` 是给用户看的说明文案。
 pub fn open_or_rebuild(path: &Path) -> Result<(Store, Option<String>)> {
     let first = match Store::open(path) {
@@ -119,13 +126,12 @@ pub fn open_or_rebuild(path: &Path) -> Result<(Store, Option<String>)> {
     for suffix in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
-    let store = Store::open(path)
-        .with_context(|| format!("rebuild failed after: {first}"))?;
+    let store = Store::open(path).with_context(|| format!("rebuild failed after: {first}"))?;
     Ok((
         store,
         Some(format!(
-            "Index was damaged and has been rebuilt — stars, pins and custom \
-             locations are gone. The old file is kept at {}",
+            "Index was damaged and has been rebuilt — stars, pins and location \
+             settings are gone. The old file is kept at {}",
             backup.display()
         )),
     ))
@@ -147,7 +153,12 @@ impl Store {
 
     // ---------- 写路径(扫描器/用户操作) ----------
 
-    pub fn write_session(&self, meta: &SessionMeta, file_mtime: i64, units: &[IndexUnit]) -> Result<()> {
+    pub fn write_session(
+        &self,
+        meta: &SessionMeta,
+        file_mtime: i64,
+        units: &[IndexUnit],
+    ) -> Result<()> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
         write_session_tx(&tx, meta, file_mtime, units)?;
@@ -201,14 +212,20 @@ impl Store {
         let tx = conn.transaction()?;
         {
             let file_path: Option<String> = tx
-                .query_row("SELECT file_path FROM sessions WHERE key = ?1", params![key], |r| r.get(0))
+                .query_row(
+                    "SELECT file_path FROM sessions WHERE key = ?1",
+                    params![key],
+                    |r| r.get(0),
+                )
                 .optional()?;
-            let mut sel = tx.prepare_cached("SELECT id, text FROM messages WHERE session_key = ?1")?;
+            let mut sel =
+                tx.prepare_cached("SELECT id, text FROM messages WHERE session_key = ?1")?;
             let rows: Vec<(i64, String)> = sel
                 .query_map(params![key], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            let mut fts_del =
-                tx.prepare_cached("INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', ?1, ?2)")?;
+            let mut fts_del = tx.prepare_cached(
+                "INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', ?1, ?2)",
+            )?;
             for (id, text) in rows {
                 fts_del.execute(params![id, text])?;
             }
@@ -257,7 +274,12 @@ impl Store {
         Ok(key)
     }
 
-    pub fn set_user_data(&self, key: &str, favorite: Option<bool>, pinned: Option<bool>) -> Result<()> {
+    pub fn set_user_data(
+        &self,
+        key: &str,
+        favorite: Option<bool>,
+        pinned: Option<bool>,
+    ) -> Result<()> {
         let conn = self.write.lock().unwrap();
         conn.execute(
             "INSERT INTO user_data(session_key, favorite, pinned, updated_at)
@@ -266,7 +288,12 @@ impl Store {
                favorite = COALESCE(?2, user_data.favorite),
                pinned   = COALESCE(?3, user_data.pinned),
                updated_at = excluded.updated_at",
-            params![key, favorite.map(|v| v as i64), pinned.map(|v| v as i64), now_ms()],
+            params![
+                key,
+                favorite.map(|v| v as i64),
+                pinned.map(|v| v as i64),
+                now_ms()
+            ],
         )?;
         Ok(())
     }
@@ -316,6 +343,43 @@ impl Store {
         (customs, removed, removed_roots)
     }
 
+    /// 被用户暂时停用的数据根。与 removed_defaults 不同：停用只控制扫描，
+    /// location 配置本身仍在，因此管理面板可以原位重新开启。
+    pub fn disabled_locations(&self) -> Vec<(AgentId, std::path::PathBuf)> {
+        self.list_disabled_locations()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(a, p)| AgentId::from_str(&a).map(|a| (a, std::path::PathBuf::from(p))))
+            .collect()
+    }
+
+    pub fn list_disabled_locations(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.read.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT agent, path FROM disabled_locations ORDER BY disabled_at, agent, path",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// location 开关的唯一写入口。enabled=true 删除停用标记；false 幂等记入。
+    pub fn set_location_enabled(&self, agent: &str, path: &str, enabled: bool) -> Result<()> {
+        let conn = self.write.lock().unwrap();
+        if enabled {
+            conn.execute(
+                "DELETE FROM disabled_locations WHERE agent = ?1 AND path = ?2",
+                params![agent, path],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT OR IGNORE INTO disabled_locations(agent, path, disabled_at)
+                 VALUES (?1, ?2, ?3)",
+                params![agent, path, now_ms()],
+            )?;
+        }
+        Ok(())
+    }
+
     /// 编辑 location 的全形态原子写入(2026-08-24 Codex review:分开自动提交
     /// 时第二步失败会把配置改成半生效)。旧单元:自定义 = 删记录,普通预设 =
     /// 压整家默认,多产品库预设 = 只压该 root;新单元一律记自定义——含换
@@ -325,11 +389,34 @@ impl Store {
         old_agent: &str,
         old_custom_path: Option<&str>,
         old_default_root: Option<&str>,
+        old_data_root: &str,
         new_agent: &str,
         new_path: &str,
     ) -> Result<()> {
         let mut conn = self.write.lock().unwrap();
         let tx = conn.transaction()?;
+        // 编辑被停用的 location 后，新路径按启用状态开始；旧路径留下停用记录
+        // 会在用户日后重新添加同一路径时意外继承，因此随旧配置一并清理。
+        let disabled: Vec<String> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT path FROM disabled_locations WHERE agent = ?1 ORDER BY path",
+            )?;
+            let rows = stmt.query_map(params![old_agent], |r| r.get(0))?;
+            rows.flatten().collect()
+        };
+        // 自定义配置可能派生多个数据根，按落库父路径整组清；内置配置则按
+        // 用户正在编辑的真实数据根清。old_default_root 只管 Remove/替换语义，
+        // 不能兼任这里的状态键（多数 adapter 在该参数中是 None）。
+        let disabled_unit = old_custom_path.unwrap_or(old_data_root);
+        for path in disabled
+            .iter()
+            .filter(|path| crate::adapters::path_owns(disabled_unit, path))
+        {
+            tx.execute(
+                "DELETE FROM disabled_locations WHERE agent = ?1 AND path = ?2",
+                params![old_agent, path],
+            )?;
+        }
         match (old_custom_path, old_default_root) {
             (Some(p), _) => {
                 tx.execute(
@@ -358,13 +445,14 @@ impl Store {
         Ok(())
     }
 
-    /// 恢复初始:清空全部 location 偏离(自定义 + 被移除的预设/预设路径)
+    /// 恢复初始:清空全部 location 偏离（自定义、被移除预设与停用状态）。
     pub fn clear_location_overrides(&self) -> Result<()> {
         let conn = self.write.lock().unwrap();
         conn.execute_batch(
             "DELETE FROM custom_roots;
              DELETE FROM removed_defaults;
-             DELETE FROM removed_default_roots;",
+             DELETE FROM removed_default_roots;
+             DELETE FROM disabled_locations;",
         )?;
         Ok(())
     }
@@ -408,11 +496,31 @@ impl Store {
     }
 
     pub fn remove_custom_root(&self, agent: &str, path: &str) -> Result<()> {
-        let conn = self.write.lock().unwrap();
-        conn.execute(
+        let mut conn = self.write.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "DELETE FROM custom_roots WHERE agent = ?1 AND path = ?2",
             params![agent, path],
         )?;
+        // 同一配置可能派生多个真实根（如 Codex sessions + archived）；真正
+        // Remove 时一并清掉这些根的停用标记，今后重新添加应默认启用。
+        let disabled: Vec<String> = {
+            let mut stmt = tx.prepare_cached(
+                "SELECT path FROM disabled_locations WHERE agent = ?1 ORDER BY path",
+            )?;
+            let rows = stmt.query_map(params![agent], |r| r.get(0))?;
+            rows.flatten().collect()
+        };
+        for disabled_path in disabled
+            .iter()
+            .filter(|disabled_path| crate::adapters::path_owns(path, disabled_path))
+        {
+            tx.execute(
+                "DELETE FROM disabled_locations WHERE agent = ?1 AND path = ?2",
+                params![agent, disabled_path],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -428,7 +536,8 @@ impl Store {
 
     pub fn known_files(&self) -> Result<HashMap<String, (i64, i64, String)>> {
         let conn = self.read.lock().unwrap();
-        let mut stmt = conn.prepare_cached("SELECT file_path, file_mtime, file_size, key FROM sessions")?;
+        let mut stmt =
+            conn.prepare_cached("SELECT file_path, file_mtime, file_size, key FROM sessions")?;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
         })?;
@@ -576,8 +685,9 @@ impl Store {
 
     pub fn agent_counts(&self) -> Result<HashMap<String, i64>> {
         let conn = self.read.lock().unwrap();
-        let mut stmt =
-            conn.prepare_cached("SELECT agent_id, COUNT(*) FROM sessions WHERE archived = 0 GROUP BY agent_id")?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT agent_id, COUNT(*) FROM sessions WHERE archived = 0 GROUP BY agent_id",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         let mut map = HashMap::new();
         for r in rows {
@@ -714,7 +824,14 @@ impl Store {
                 },
             )?;
             for r in rows {
-                let (k, seq, sc, role, ts, text): (String, i64, Option<String>, String, Option<i64>, String) = r?;
+                let (k, seq, sc, role, ts, text): (
+                    String,
+                    i64,
+                    Option<String>,
+                    String,
+                    Option<i64>,
+                    String,
+                ) = r?;
                 raw.push((k, seq, sc, role, ts, make_like_snippet(&text, segs[0])));
             }
         }
@@ -740,7 +857,8 @@ impl Store {
     }
 }
 
-const SESSION_COLS: &str = "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
+const SESSION_COLS: &str =
+    "s.key, s.agent_id, s.native_id, s.title, s.project_path, s.project_name,
     s.git_branch, s.created_at, s.updated_at, s.message_count, s.tokens_used, s.model, s.source,
     s.archived, s.file_path, s.file_size, COALESCE(u.favorite,0), COALESCE(u.pinned,0)";
 
@@ -788,7 +906,10 @@ fn write_session_tx(
         fts_del.execute(params![id, text])?;
     }
     drop(fts_del);
-    tx.execute("DELETE FROM messages WHERE session_key = ?1", params![meta.key])?;
+    tx.execute(
+        "DELETE FROM messages WHERE session_key = ?1",
+        params![meta.key],
+    )?;
 
     upsert_session(tx, meta, file_mtime)?;
 
@@ -849,7 +970,9 @@ fn upsert_session(tx: &rusqlite::Transaction<'_>, m: &SessionMeta, file_mtime: i
 }
 
 fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 fn make_like_snippet(text: &str, first_seg: &str) -> String {

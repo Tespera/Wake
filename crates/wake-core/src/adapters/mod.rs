@@ -39,7 +39,10 @@ pub trait AgentAdapter: Send + Sync {
         parse_utils::default_file_ref(self.agent(), path)
     }
     /// 快路径:不解析文件直接给出 meta(Codex 走 state DB)。None = 无快路径
-    fn quick_meta(&self, _refs: &[SessionFileRef]) -> Option<std::collections::HashMap<String, SessionMeta>> {
+    fn quick_meta(
+        &self,
+        _refs: &[SessionFileRef],
+    ) -> Option<std::collections::HashMap<String, SessionMeta>> {
         None
     }
     /// quick 与 parsed 的合并策略:默认 parsed 为准、quick 补缺。
@@ -61,7 +64,11 @@ pub trait AgentAdapter: Send + Sync {
     /// 详情解析
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript>;
     /// 加载 sidechain 消息(仅 Claude/Cursor subagents)
-    fn load_sidechain(&self, _r: &SessionFileRef, _sidechain_id: &str) -> Result<Vec<TranscriptMessage>> {
+    fn load_sidechain(
+        &self,
+        _r: &SessionFileRef,
+        _sidechain_id: &str,
+    ) -> Result<Vec<TranscriptMessage>> {
         Ok(Vec::new())
     }
     /// 会话在磁盘上的全部归属路径(删除时一并 trash)。默认仅主文件;
@@ -81,7 +88,10 @@ pub trait AgentAdapter: Send + Sync {
     /// 只有当监听范围确实不同于数据根时才覆写——否则一次根路径搬迁
     /// (如 CODEX_HOME / XDG_DATA_HOME)就要在两处各改一遍,漏一处则静默失去实时更新
     fn watch_paths(&self) -> Vec<std::path::PathBuf> {
-        self.data_roots().into_iter().filter(|p| p.is_dir()).collect()
+        self.data_roots()
+            .into_iter()
+            .filter(|p| p.is_dir())
+            .collect()
     }
     /// 以自定义数据根构造本家的第二实例("Session locations" 的 Add location)。
     /// `dir` 是用户在系统目录选择器里选中的目录;各家把它整形成自己默认根的形态
@@ -96,12 +106,10 @@ pub trait AgentAdapter: Send + Sync {
     fn supports_individual_root_removal(&self) -> bool {
         false
     }
-    /// 返回排除指定默认根后的同类 adapter。只在上一能力为 true 时调用；None
-    /// 表示不支持按根裁剪。
-    fn excluding_data_roots(
-        &self,
-        _roots: &[std::path::PathBuf],
-    ) -> Option<Box<dyn AgentAdapter>> {
+    /// 返回排除指定数据根后的同类 adapter。默认 location 的 Remove 只在上一
+    /// 能力为 true 时调用；逐行启停也用它过滤多根 adapter，但不改变 Remove
+    /// 的产品语义。None 表示不支持局部裁剪。
+    fn excluding_data_roots(&self, _roots: &[std::path::PathBuf]) -> Option<Box<dyn AgentAdapter>> {
         None
     }
 }
@@ -166,7 +174,6 @@ pub fn create_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
-
 /// 用户 location 配置下的完整 roster:默认实例在前(被用户移除的家除外),
 /// 自定义实例按存储顺序追加在后。顺序是契约的一部分——"按 agent 找第一个"
 /// 的兜底路径(watcher file_ref、adapter_ix_for 的 fallback)落在该家现存的
@@ -218,13 +225,72 @@ fn create_adapters_with_root_overrides(
     v
 }
 
+/// 管理界面中的一条真实数据根。`locations` 保留停用项；扫描与监听只消费
+/// `AdapterRoster::active`，两者由同一批 adapter 实例派生，避免环境变量或
+/// 文件系统探测在二次构造时产生不同快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterLocation {
+    pub agent: AgentId,
+    pub path: std::path::PathBuf,
+    pub enabled: bool,
+    /// 默认 location 的编辑表单是否允许只移除这一根（目前仅 OpenCode）。
+    pub individually_removable: bool,
+}
+
+pub struct AdapterRoster {
+    pub active: Vec<Box<dyn AgentAdapter>>,
+    pub locations: Vec<AdapterLocation>,
+}
+
+/// 按索引库配置同时构造“全部 location 快照”和“仅启用的扫描 roster”。停用
+/// 记录按 (agent, 真实数据根) 精确匹配，因此同一 Agent 的多个 location 可独立
+/// 控制；单根 adapter 全关后直接移出 active，多根 adapter 走局部裁剪。
+pub fn create_adapter_roster_for(store: &crate::db::Store) -> AdapterRoster {
+    let (customs, removed, removed_roots) = store.location_overrides();
+    let configured = create_adapters_with_root_overrides(&customs, &removed, &removed_roots);
+    let disabled: std::collections::HashSet<(AgentId, std::path::PathBuf)> =
+        store.disabled_locations().into_iter().collect();
+
+    let mut locations = Vec::new();
+    let mut active = Vec::new();
+    for adapter in configured {
+        let agent = adapter.agent();
+        let individually_removable = adapter.supports_individual_root_removal();
+        let roots = adapter.data_roots();
+        let excluded: Vec<std::path::PathBuf> = roots
+            .iter()
+            .filter(|root| disabled.contains(&(agent, (*root).clone())))
+            .cloned()
+            .collect();
+        locations.extend(roots.iter().cloned().map(|path| AdapterLocation {
+            agent,
+            enabled: !disabled.contains(&(agent, path.clone())),
+            path,
+            individually_removable,
+        }));
+
+        if excluded.is_empty() {
+            active.push(adapter);
+        } else if excluded.len() < roots.len() {
+            // 只有多根 adapter 会到这里。若某个新 adapter 尚未实现局部裁剪，
+            // 保守地整实例停用，绝不能继续扫描用户明确关掉的路径。
+            if let Some(filtered) = adapter.excluding_data_roots(&excluded) {
+                if !filtered.data_roots().is_empty() {
+                    active.push(filtered);
+                }
+            }
+        }
+    }
+
+    AdapterRoster { active, locations }
+}
+
 /// 按索引库里的 location 配置构造 roster——**所有打开真实索引库的入口**
 /// (GUI 与 scan CLI)都必须走这里:用默认 roster 对配置过的库跑 run_scan,
 /// 删除检测会把自定义根的会话当"磁盘已删"整批清掉,再把被压制的默认根加回
 /// (2026-08-24 Codex review 抓到 scan bin 正是这么毁数据的)
 pub fn create_adapters_for(store: &crate::db::Store) -> Vec<Box<dyn AgentAdapter>> {
-    let (customs, removed, removed_roots) = store.location_overrides();
-    create_adapters_with_root_overrides(&customs, &removed, &removed_roots)
+    create_adapter_roster_for(store).active
 }
 
 /// 数据根是否拥有该会话文件路径。边界必须落在分隔符(目录型)或 '#'(SQLite

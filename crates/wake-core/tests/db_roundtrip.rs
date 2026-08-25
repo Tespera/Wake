@@ -92,7 +92,9 @@ fn user_data_survives_rebuild() {
     let (_dir, store) = temp_store();
     let m = meta("claude-code:s3", "收藏的会话");
     store.write_session(&m, m.updated_at, &[]).unwrap();
-    store.set_user_data("claude-code:s3", Some(true), Some(true)).unwrap();
+    store
+        .set_user_data("claude-code:s3", Some(true), Some(true))
+        .unwrap();
 
     // 重建索引(sessions/messages 清空重来)后,收藏/置顶必须还在
     store.rebuild_all().unwrap();
@@ -128,7 +130,10 @@ fn list_sessions_filters_and_counts() {
     assert_eq!(total, 2);
     assert_eq!(sessions[0].key, "claude-code:s4", "默认按 updated 降序");
 
-    let only_codex = SessionFilter { agents: vec![AgentId::Codex], ..all };
+    let only_codex = SessionFilter {
+        agents: vec![AgentId::Codex],
+        ..all
+    };
     let (sessions, total) = store.list_sessions(&only_codex).unwrap();
     assert_eq!(total, 1);
     assert_eq!(sessions[0].key, "codex:s5");
@@ -158,7 +163,10 @@ fn path_counts_respect_agent_and_boundary() {
     let counts = store
         .counts_by_path_prefix(&[
             ("claude-code".into(), "/home/u/.claude/projects".into()),
-            ("codex".into(), "/home/u/.claude/projects/codex/sessions".into()),
+            (
+                "codex".into(),
+                "/home/u/.claude/projects/codex/sessions".into(),
+            ),
         ])
         .expect("counts");
     assert_eq!(counts[0], 1, "codex 的会话不该被记到 claude 行");
@@ -210,7 +218,7 @@ fn custom_roots_roundtrip() {
     // 编辑的原子替换:自定义换路径 / 预设改自定义 / 换 agent,全走单事务
     store.add_custom_root("grok", "/tmp/g1").unwrap();
     store
-        .replace_location("grok", Some("/tmp/g1"), None, "grok", "/tmp/g2")
+        .replace_location("grok", Some("/tmp/g1"), None, "/tmp/g1", "grok", "/tmp/g2")
         .unwrap();
     assert_eq!(
         store.list_custom_roots().unwrap(),
@@ -220,7 +228,7 @@ fn custom_roots_roundtrip() {
         ]
     );
     store
-        .replace_location("kiro", None, None, "kiro", "/tmp/k")
+        .replace_location("kiro", None, None, "/tmp/kiro-default", "kiro", "/tmp/k")
         .unwrap();
     assert!(store
         .list_removed_defaults()
@@ -231,6 +239,7 @@ fn custom_roots_roundtrip() {
             "opencode",
             None,
             Some("/tmp/opencode.db"),
+            "/tmp/opencode.db",
             "opencode",
             "/tmp/opencode-copy",
         )
@@ -240,7 +249,14 @@ fn custom_roots_roundtrip() {
         .unwrap()
         .contains(&("opencode".to_string(), "/tmp/opencode.db".to_string())));
     store
-        .replace_location("grok", Some("/tmp/g2"), None, "cursor", "/tmp/cur")
+        .replace_location(
+            "grok",
+            Some("/tmp/g2"),
+            None,
+            "/tmp/g2",
+            "cursor",
+            "/tmp/cur",
+        )
         .unwrap();
     let roots = store.list_custom_roots().unwrap();
     assert!(roots.iter().any(|(a, p)| a == "cursor" && p == "/tmp/cur"));
@@ -254,6 +270,68 @@ fn custom_roots_roundtrip() {
     assert!(store.list_removed_default_roots().unwrap().is_empty());
 }
 
+/// location 开关只持久化停用状态，不删除配置；真正 Remove 自定义根或
+/// Restore defaults 时清理相关状态，今后重新添加默认启用。
+#[test]
+fn disabled_locations_roundtrip() {
+    let (_dir, store) = temp_store();
+    store.add_custom_root("codex", "/tmp/codex-copy").unwrap();
+    store
+        .set_location_enabled("codex", "/tmp/codex-copy/sessions", false)
+        .unwrap();
+    store
+        .set_location_enabled("codex", "/tmp/codex-copy/sessions", false)
+        .unwrap(); // 幂等
+    store
+        .set_location_enabled("claude-code", "/tmp/claude", false)
+        .unwrap();
+
+    let mut disabled = store.list_disabled_locations().unwrap();
+    disabled.sort();
+    assert_eq!(
+        disabled,
+        vec![
+            ("claude-code".to_string(), "/tmp/claude".to_string()),
+            ("codex".to_string(), "/tmp/codex-copy/sessions".to_string(),),
+        ]
+    );
+    assert_eq!(store.disabled_locations().len(), 2);
+
+    store
+        .set_location_enabled("claude-code", "/tmp/claude", true)
+        .unwrap();
+    assert_eq!(store.list_disabled_locations().unwrap().len(), 1);
+
+    store
+        .remove_custom_root("codex", "/tmp/codex-copy")
+        .unwrap();
+    assert!(store.list_disabled_locations().unwrap().is_empty());
+
+    store
+        .set_location_enabled("gemini", "/tmp/gemini-default", false)
+        .unwrap();
+    store
+        .replace_location(
+            "gemini",
+            None,
+            None,
+            "/tmp/gemini-default",
+            "gemini",
+            "/tmp/gemini-copy",
+        )
+        .unwrap();
+    assert!(
+        store.list_disabled_locations().unwrap().is_empty(),
+        "编辑停用的内置 location 后遗留了旧状态"
+    );
+
+    store
+        .set_location_enabled("cursor", "/tmp/cursor", false)
+        .unwrap();
+    store.clear_location_overrides().unwrap();
+    assert!(store.list_disabled_locations().unwrap().is_empty());
+}
+
 /// 增量写入的胜者裁决在写事务内:败方副本(旧 mtime、异路径)一字不写,
 /// 反超后按规则接管(2026-08-24 Codex review)
 #[test]
@@ -265,9 +343,21 @@ fn guarded_write_respects_winner() {
 
     let mut loser = meta("codex:g", "败方");
     loser.file_path = "/backup/g.jsonl".into();
-    assert!(!store.write_session_guarded(&loser, 5, &[]).unwrap(), "败方不该写入");
-    assert_eq!(store.get_session("codex:g").unwrap().unwrap().file_path, "/live/g.jsonl");
+    assert!(
+        !store.write_session_guarded(&loser, 5, &[]).unwrap(),
+        "败方不该写入"
+    );
+    assert_eq!(
+        store.get_session("codex:g").unwrap().unwrap().file_path,
+        "/live/g.jsonl"
+    );
 
-    assert!(store.write_session_guarded(&loser, 12, &[]).unwrap(), "反超应接管");
-    assert_eq!(store.get_session("codex:g").unwrap().unwrap().file_path, "/backup/g.jsonl");
+    assert!(
+        store.write_session_guarded(&loser, 12, &[]).unwrap(),
+        "反超应接管"
+    );
+    assert_eq!(
+        store.get_session("codex:g").unwrap().unwrap().file_path,
+        "/backup/g.jsonl"
+    );
 }

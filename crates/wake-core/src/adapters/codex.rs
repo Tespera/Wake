@@ -14,6 +14,8 @@ pub struct CodexAdapter {
     sessions_dir: PathBuf,
     archived_dir: PathBuf,
     state_db: PathBuf,
+    scan_sessions: bool,
+    scan_archived: bool,
 }
 
 impl CodexAdapter {
@@ -28,6 +30,8 @@ impl CodexAdapter {
             sessions_dir: root.join("sessions"),
             archived_dir: root.join("archived_sessions"),
             state_db: root.join("state_5.sqlite"),
+            scan_sessions: true,
+            scan_archived: true,
         }
     }
 }
@@ -67,9 +71,7 @@ pub(crate) fn normalize_custom_root(dir: PathBuf) -> PathBuf {
             let sibling = match name {
                 Some("sessions") => parent.join("archived_sessions").is_dir(),
                 Some("archived_sessions") => parent.join("sessions").is_dir(),
-                _ => {
-                    parent.join("sessions").is_dir() || parent.join("archived_sessions").is_dir()
-                }
+                _ => parent.join("sessions").is_dir() || parent.join("archived_sessions").is_dir(),
             };
             if parent.join("state_5.sqlite").is_file() || sibling {
                 return parent.to_path_buf();
@@ -345,7 +347,10 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                         }
                     }
                     "function_call_output" | "custom_tool_call_output" => {
-                        let call_id = payload.get("call_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let call_id = payload
+                            .get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
                         if let Some(&(mi, ti)) = tool_index.get(call_id) {
                             let out_text = match payload.get("output") {
                                 Some(Value::String(s)) => s.clone(),
@@ -353,10 +358,13 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                                     .get("content")
                                     .and_then(|v| v.as_str())
                                     .map(String::from)
-                                    .unwrap_or_else(|| serde_json::to_string(o).unwrap_or_default()),
+                                    .unwrap_or_else(|| {
+                                        serde_json::to_string(o).unwrap_or_default()
+                                    }),
                                 _ => String::new(),
                             };
-                            messages[mi].tool_calls[ti].output = Some(clip(&out_text, MAX_TOOL_IO).0);
+                            messages[mi].tool_calls[ti].output =
+                                Some(clip(&out_text, MAX_TOOL_IO).0);
                         }
                     }
                     _ => {}
@@ -385,8 +393,12 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                     "agent_message" => {
                         if let Some(m) = payload.get("message").and_then(|v| v.as_str()) {
                             if !m.trim().is_empty() {
-                                event_fallback
-                                    .push(mk_msg(Role::Assistant, MessageKind::Text, m.trim(), ts));
+                                event_fallback.push(mk_msg(
+                                    Role::Assistant,
+                                    MessageKind::Text,
+                                    m.trim(),
+                                    ts,
+                                ));
                             }
                         }
                     }
@@ -394,7 +406,12 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                 }
             }
             "compacted" => {
-                messages.push(mk_msg(Role::System, MessageKind::CompactSummary, "── Context compacted ──", ts));
+                messages.push(mk_msg(
+                    Role::System,
+                    MessageKind::CompactSummary,
+                    "── Context compacted ──",
+                    ts,
+                ));
             }
             "world_state" => {}
             _ => unknown_lines += 1,
@@ -402,7 +419,9 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
     }
 
     // response_item 完全缺席的会话退回 event_msg 流
-    let has_real = messages.iter().any(|m| m.kind == MessageKind::Text && !m.text.is_empty());
+    let has_real = messages
+        .iter()
+        .any(|m| m.kind == MessageKind::Text && !m.text.is_empty());
     let mut final_messages = if has_real {
         messages
     } else if !event_fallback.is_empty() {
@@ -462,8 +481,16 @@ fn build_meta(r: &SessionFileRef, p: &CodexParse, archived_dir: &Path) -> Sessio
         project_path: p.cwd.clone(),
         project_name,
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
-        updated_at: if p.updated_at > 0 { p.updated_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if p.updated_at > 0 {
+            p.updated_at
+        } else {
+            r.mtime_ms
+        },
         message_count: p
             .messages
             .iter()
@@ -472,8 +499,14 @@ fn build_meta(r: &SessionFileRef, p: &CodexParse, archived_dir: &Path) -> Sessio
         size_bytes: r.size,
         git_branch: p.git_branch.clone(),
         model: p.model.clone(),
-        tokens_used: if p.tokens_used > 0 { Some(p.tokens_used) } else { None },
-        archived: r.file_path.starts_with(&archived_dir.to_string_lossy().to_string()),
+        tokens_used: if p.tokens_used > 0 {
+            Some(p.tokens_used)
+        } else {
+            None
+        },
+        archived: r
+            .file_path
+            .starts_with(&archived_dir.to_string_lossy().to_string()),
         source: p.source.clone(),
         favorite: false,
         pinned: false,
@@ -486,8 +519,18 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn list_session_files(&self) -> Result<Vec<SessionFileRef>> {
-        let mut refs = list_jsonl_refs(&self.sessions_dir, AgentId::Codex, rollout_native_id);
-        refs.extend(list_jsonl_refs(&self.archived_dir, AgentId::Codex, rollout_native_id));
+        let mut refs = if self.scan_sessions {
+            list_jsonl_refs(&self.sessions_dir, AgentId::Codex, rollout_native_id)
+        } else {
+            Vec::new()
+        };
+        if self.scan_archived {
+            refs.extend(list_jsonl_refs(
+                &self.archived_dir,
+                AgentId::Codex,
+                rollout_native_id,
+            ));
+        }
         Ok(refs)
     }
 
@@ -612,10 +655,29 @@ impl AgentAdapter for CodexAdapter {
             sessions_dir,
             archived_dir,
             state_db: dir.join("state_5.sqlite"),
+            scan_sessions: true,
+            scan_archived: true,
         })
     }
 
     fn data_roots(&self) -> Vec<PathBuf> {
-        vec![self.sessions_dir.clone(), self.archived_dir.clone()]
+        let mut roots = Vec::with_capacity(2);
+        if self.scan_sessions {
+            roots.push(self.sessions_dir.clone());
+        }
+        if self.scan_archived {
+            roots.push(self.archived_dir.clone());
+        }
+        roots
+    }
+
+    fn excluding_data_roots(&self, roots: &[PathBuf]) -> Option<Box<dyn AgentAdapter>> {
+        Some(Box::new(Self {
+            sessions_dir: self.sessions_dir.clone(),
+            archived_dir: self.archived_dir.clone(),
+            state_db: self.state_db.clone(),
+            scan_sessions: self.scan_sessions && !roots.contains(&self.sessions_dir),
+            scan_archived: self.scan_archived && !roots.contains(&self.archived_dir),
+        }))
     }
 }

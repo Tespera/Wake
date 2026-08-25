@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.8] — 2026-08-25
+
+- New: every Session location has its own on/off switch — disabled paths stop scanning and disappear from browse/search results without losing their configuration
+- Update: Remove is reserved for custom locations; built-in locations can be disabled and re-enabled in place
+- Fix: disabled locations remain part of duplicate-path validation, and Restore defaults updates immediately as switches change
+
 ## [0.2.7] — 2026-08-25
 
 - New: experimental Windows support — browse, search and resume sessions on Windows desktops; build from source with `scripts/make-windows.ps1`, or grab a prebuilt zip from the manual "Windows artifact" workflow
