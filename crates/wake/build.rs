@@ -18,6 +18,12 @@ fn main() {
     res.set("ProductName", "Wake");
     res.set("FileDescription", "Wake — coding agent session manager");
     if let Err(e) = res.compile() {
+        // 宿主即 Windows(= 真机构建,rc.exe 理应在)时硬失败:静默降级会让
+        // make-windows.ps1 打出一个没图标、没版本信息的 exe 而无人察觉;
+        // 跨平台 check(Linux 宿主查 windows 目标)才允许降级为警告
+        if cfg!(windows) {
+            panic!("Windows resources failed to embed (icon/version info): {e}");
+        }
         println!("cargo:warning=Windows resources skipped (icon/version info): {e}");
     }
 }

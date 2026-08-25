@@ -1296,6 +1296,15 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> bool {
         let expanded = expand_tilde(raw_text.trim());
+        // Windows 上把手输的 '/' 折成 '\':`~/.claude` 展开后是
+        // `C:\Users\me/.claude` 这种混分隔符形态,而 path_owns 的重叠判定是
+        // 字节精确比较、explorer 只认反斜杠——不在入口归一,同一目录就会以
+        // 两种拼写各注册一份(POSIX 不动:'\' 在那边是合法文件名字符)
+        let expanded = if cfg!(target_os = "windows") {
+            expanded.replace('/', "\\")
+        } else {
+            expanded
+        };
         // 绝对性先判、只判一次:is_absolute 三端同判据(starts_with('/') 会把
         // 所有 Windows 盘符路径误拒),空串它也判 false,无需另设 is_empty 关。
         // **必须判在剪尾之前**:`//` 剪完是空串,若拿剪后的结果去判就会退回
@@ -2871,6 +2880,16 @@ impl Workbench {
                                                     .on_click(cx.listener(move |this, _, window, cx| {
                                                         if let Some(term) = current {
                                                             this.do_resume(term, remember_current, window, cx);
+                                                        } else {
+                                                            // 空列表在 macOS 不可能(Terminal.app 恒在),
+                                                            // Windows/Linux 上 PATH 被启动器改写时会发生
+                                                            // ——静默无操作是死按钮,至少说一声为什么
+                                                            window.push_notification(
+                                                                Notification::warning(
+                                                                    "No terminal application found on PATH",
+                                                                ),
+                                                                cx,
+                                                            );
                                                         }
                                                     })),
                                             )
