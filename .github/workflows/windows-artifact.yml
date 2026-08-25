@@ -1,0 +1,33 @@
+# Windows 发行产物:手动触发,在真 Windows runner 上跑 make-windows.ps1
+# 打 zip 传 artifact(gpui 的 DirectX shader 编译无法交叉,zip 只能产自
+# 真 Windows;维护者无 Windows 真机,这条 workflow 是唯一产物来源)。
+# 与 ci.yml 互不相干:CI 管测试与编译门槛,这里只管打包。
+name: Windows artifact
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows zip
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # release 构建 + 打包(版本号取 Cargo.toml、架构取 rustc host triple)
+      - name: Package
+        shell: pwsh
+        run: ./scripts/make-windows.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wake-windows
+          path: dist/wake-*-windows-*.zip
+          if-no-files-found: error
