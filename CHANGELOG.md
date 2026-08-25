@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.9] — 2026-08-25
+
+- Update: Session location management now lives in a dedicated Settings window, available from the sidebar gear, the Wake menu, or `⌘,`
+- Update: locations are grouped by agent, undetected agents stay collapsed by default, and row actions move into a compact overflow menu
+- New: Settings now includes General, Locations, Data, and About pages, with a persistent System / Light / Dark appearance choice
+- New: About Wake mirrors the Kooky/Birth information hierarchy with Wake's icon, version, tagline, GitHub link, license, and author credit; the Wake menu opens the same page
+- New: the Data page shows Wake's local storage path and size and opens it in the file manager; session refresh remains in the main sidebar
+- Update: Settings buttons and the appearance selector now share Wake's compact sizing, corner radius, and quiet secondary treatment
+- Fix: location scans continue to reach their terminal state when the main window closes while Settings remains open
+
 ## [0.2.8] — 2026-08-25
 
 - New: every Session location has its own on/off switch — disabled paths stop scanning and disappear from browse/search results without losing their configuration

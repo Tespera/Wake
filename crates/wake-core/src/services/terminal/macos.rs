@@ -125,7 +125,9 @@ pub fn ensure_app_icons(cache_dir: &Path) -> HashMap<String, std::path::PathBuf>
     let mut script =
         String::from("ObjC.import('AppKit');\nconst ws = $.NSWorkspace.sharedWorkspace;\n");
     for (t, png) in &jobs {
-        let Some(app) = t.resolved_app_path() else { continue };
+        let Some(app) = t.resolved_app_path() else {
+            continue;
+        };
         script.push_str(&format!(
             "{{ const i = ws.iconForFile('{app}'); const rep = $.NSBitmapImageRep.imageRepWithData(i.TIFFRepresentation); \
              const png = rep.representationUsingTypeProperties(4, $.NSDictionary.dictionary); \
@@ -294,25 +296,45 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
 /// `open --cwd <项目> -e "<命令>"`,与 Terminal/iTerm 收命令文本同级。
 /// 命令从 session_bin + resume_args 拼(与真终端路径同一来源),cd 由 --cwd 承担
 fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
-    let fail = |command: String, error: String| ResumeOutcome { ok: false, command, error: Some(error) };
+    let fail = |command: String, error: String| ResumeOutcome {
+        ok: false,
+        command,
+        error: Some(error),
+    };
     let Some(cli) = kooky_cli_path() else {
-        return fail(String::new(), "kooky-cli not found — update Kooky to 0.51+".into());
+        return fail(
+            String::new(),
+            "kooky-cli not found — update Kooky to 0.51+".into(),
+        );
     };
     let Some((bin, (args, _))) = session_bin(meta).zip(resume_args(meta.agent, &meta.id)) else {
-        return fail(String::new(), format!("Resume isn't supported for {} yet", meta.agent.display_name()));
+        return fail(
+            String::new(),
+            format!(
+                "Resume isn't supported for {} yet",
+                meta.agent.display_name()
+            ),
+        );
     };
     // agent CLI 走与真终端路径同一次解析(GUI 进程 PATH 不全,过 login shell),
     // 顺带承担"装没装"的判断:少了这步,kooky 会开出一个只写着 command not
     // found 的 tab,而 Wake 这边照报成功
     let Some(exe) = resolve_cli(bin) else {
-        return fail(String::new(), format!("Command {bin} not found — is it installed?"));
+        return fail(
+            String::new(),
+            format!("Command {bin} not found — is it installed?"),
+        );
     };
     let cmd = std::iter::once(exe.as_str())
         .chain(args.iter().map(|s| s.as_str()))
         .map(posix_quote)
         .collect::<Vec<_>>()
         .join(" ");
-    let shown = format!("kooky-cli open --cwd {} -e {}", posix_quote(&meta.project_path), posix_quote(&cmd));
+    let shown = format!(
+        "kooky-cli open --cwd {} -e {}",
+        posix_quote(&meta.project_path),
+        posix_quote(&cmd)
+    );
     // 手动兜底的是能直接粘进任何终端跑的那条(kooky 的 --cwd 得自己 cd 回来)
     let cwd_ok = !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir();
     let manual = if cwd_ok {
@@ -321,18 +343,35 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
         cmd.clone()
     };
     let bail = |reason: String| {
-        fail(shown.clone(), format!("{reason}. {}", super::clipboard_fallback(&manual)))
+        fail(
+            shown.clone(),
+            format!("{reason}. {}", super::clipboard_fallback(&manual)),
+        )
     };
     // 项目挪走了 kooky 的 --cwd 就没法落地。走同一条兜底,别让 Kooky 目标
     // 比 Terminal 少一份可手动执行的命令
     if !cwd_ok {
-        return bail(format!("Project directory no longer exists: {}", meta.project_path));
+        return bail(format!(
+            "Project directory no longer exists: {}",
+            meta.project_path
+        ));
     }
-    match Command::new(cli).args(["open", "--cwd", &meta.project_path, "-e", &cmd]).output() {
-        Ok(out) if out.status.success() => ResumeOutcome { ok: true, command: shown, error: None },
+    match Command::new(cli)
+        .args(["open", "--cwd", &meta.project_path, "-e", &cmd])
+        .output()
+    {
+        Ok(out) if out.status.success() => ResumeOutcome {
+            ok: true,
+            command: shown,
+            error: None,
+        },
         Ok(out) => {
             let reason = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            bail(if reason.is_empty() { "kooky-cli refused the request".into() } else { reason })
+            bail(if reason.is_empty() {
+                "kooky-cli refused the request".into()
+            } else {
+                reason
+            })
         }
         Err(e) => bail(format!("Couldn't run kooky-cli: {e}")),
     }
@@ -345,14 +384,22 @@ fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
     if !KOOKY_ROSTER.contains(&meta.agent) {
         return launch_kooky_cli(meta);
     }
-    let id_ok = meta.id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    let id_ok = meta
+        .id
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
         && meta.id.len() <= 200
         && meta
             .id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
     if id_ok {
-        let mut url = format!("kooky://resume?agent={}&id={}", meta.agent.as_str(), meta.id);
+        let mut url = format!(
+            "kooky://resume?agent={}&id={}",
+            meta.agent.as_str(),
+            meta.id
+        );
         if !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir() {
             url.push_str("&cwd=");
             url.push_str(&percent_encode(&meta.project_path, false));
@@ -363,7 +410,11 @@ fn launch_kooky(meta: &SessionMeta) -> ResumeOutcome {
             .map(|o| o.status.success())
             .unwrap_or(false);
         if deep_ok {
-            return ResumeOutcome { ok: true, command: url, error: None };
+            return ResumeOutcome {
+                ok: true,
+                command: url,
+                error: None,
+            };
         }
     }
     let ok = Command::new("open")
@@ -387,7 +438,10 @@ pub(super) fn trash_existing(paths: &[&str]) -> anyhow::Result<()> {
             "tell application \"Finder\" to delete (POSIX file \"{esc}\" as alias)"
         )])?;
         if !out.status.success() {
-            anyhow::bail!("Failed to move to Trash: {}", String::from_utf8_lossy(&out.stderr));
+            anyhow::bail!(
+                "Failed to move to Trash: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
     Ok(())

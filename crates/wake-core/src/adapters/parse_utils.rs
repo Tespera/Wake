@@ -33,7 +33,11 @@ pub fn user_kind(text: &str) -> MessageKind {
 /// 纯文本消息构造(clip + user 注入判定),多家 adapter 共用
 pub fn text_msg(role: Role, text: &str, ts: i64) -> TranscriptMessage {
     let (clipped, truncated) = clip(text.trim(), MAX_MSG_TEXT);
-    let kind = if role == Role::User { user_kind(text) } else { MessageKind::Text };
+    let kind = if role == Role::User {
+        user_kind(text)
+    } else {
+        MessageKind::Text
+    };
     TranscriptMessage {
         seq: 0,
         role,
@@ -170,9 +174,17 @@ pub fn tool_call_view(
     };
     ToolCallView {
         id,
-        name: if name.is_empty() { "tool".to_string() } else { name.to_string() },
+        name: if name.is_empty() {
+            "tool".to_string()
+        } else {
+            name.to_string()
+        },
         input_preview: make_preview(input),
-        input: if input_json.is_empty() { None } else { Some(clip(&input_json, MAX_TOOL_IO).0) },
+        input: if input_json.is_empty() {
+            None
+        } else {
+            Some(clip(&input_json, MAX_TOOL_IO).0)
+        },
         output: output.map(|o| clip(&o, MAX_TOOL_IO).0),
         is_error,
         sidechain_ref: None,
@@ -237,7 +249,10 @@ pub fn clean_title_candidate(raw: &str) -> String {
     let args = extract_tag(&s, "command-args");
     let name = extract_tag(&s, "command-name");
     if args.is_some() || name.is_some() {
-        s = args.filter(|a| !a.trim().is_empty()).or(name).unwrap_or_default();
+        s = args
+            .filter(|a| !a.trim().is_empty())
+            .or(name)
+            .unwrap_or_default();
     }
     // 去掉残余短标签
     let mut out = String::with_capacity(s.len());
@@ -344,17 +359,33 @@ pub fn is_injected_user_content(text: &str) -> bool {
 pub fn make_preview(input: &Value) -> String {
     const MAX: usize = 200;
     let cand = if let Value::Object(obj) = input {
-        ["command", "file_path", "path", "pattern", "query", "url", "description"]
-            .iter()
-            .find_map(|k| obj.get(*k).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()))
-            .map(|s| s.to_string())
-            .or_else(|| serde_json::to_string(input).ok())
+        [
+            "command",
+            "file_path",
+            "path",
+            "pattern",
+            "query",
+            "url",
+            "description",
+        ]
+        .iter()
+        .find_map(|k| {
+            obj.get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .map(|s| s.to_string())
+        .or_else(|| serde_json::to_string(input).ok())
     } else if let Value::String(s) = input {
         Some(s.clone())
     } else {
         serde_json::to_string(input).ok()
     };
-    let one = cand.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+    let one = cand
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let chars: Vec<char> = one.chars().collect();
     if chars.len() > MAX {
         let mut t: String = chars[..MAX].iter().collect();

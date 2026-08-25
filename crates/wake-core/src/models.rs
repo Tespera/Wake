@@ -73,7 +73,7 @@ impl AgentId {
             "kimi" => Some(AgentId::Kimi),
             "antigravity" => Some(AgentId::Antigravity),
             "dsh" => Some(AgentId::Dsh),
-        _ => None,
+            _ => None,
         }
     }
 
@@ -105,31 +105,54 @@ impl AgentId {
             AgentId::ClaudeCode => "brands/claude-code.png",
             AgentId::Codex => "brands/codex.png",
             AgentId::Copilot => {
-                if dark { "brands/copilot.png" } else { "brands/copilot-light.png" }
+                if dark {
+                    "brands/copilot.png"
+                } else {
+                    "brands/copilot-light.png"
+                }
             }
             AgentId::Cursor => {
-                if dark { "brands/cursor.png" } else { "brands/cursor-light.png" }
+                if dark {
+                    "brands/cursor.png"
+                } else {
+                    "brands/cursor-light.png"
+                }
             }
             AgentId::Opencode => {
-                if dark { "brands/opencode.png" } else { "brands/opencode-light.png" }
+                if dark {
+                    "brands/opencode.png"
+                } else {
+                    "brands/opencode-light.png"
+                }
             }
             AgentId::Kiro => "brands/kiro.png",
             AgentId::Gemini => "brands/gemini.png",
             AgentId::Pi => {
-                if dark { "brands/pi.png" } else { "brands/pi-light.png" }
+                if dark {
+                    "brands/pi.png"
+                } else {
+                    "brands/pi-light.png"
+                }
             }
             AgentId::Omp => "brands/omp.png",
             AgentId::Grok => {
-                if dark { "brands/grok.png" } else { "brands/grok-light.png" }
+                if dark {
+                    "brands/grok.png"
+                } else {
+                    "brands/grok-light.png"
+                }
             }
             AgentId::Kimi => {
-                if dark { "brands/kimi.png" } else { "brands/kimi-light.png" }
+                if dark {
+                    "brands/kimi.png"
+                } else {
+                    "brands/kimi-light.png"
+                }
             }
             AgentId::Antigravity => "brands/antigravity.png",
             AgentId::Dsh => "brands/deepseek.png",
         }
     }
-
 }
 
 /// 会话元数据 —— 列表页/索引库统一模型

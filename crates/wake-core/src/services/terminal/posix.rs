@@ -100,7 +100,10 @@ pub(crate) fn percent_encode(s: &str, keep_slash: bool) -> String {
 /// windows.rs 直接调 Win32 剪贴板。
 pub(crate) fn pipe_to(bin: &str, args: &[&str], text: &str) -> bool {
     use std::io::Write;
-    let Ok(mut child) = Command::new(bin).args(args).stdin(std::process::Stdio::piped()).spawn()
+    let Ok(mut child) = Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
     else {
         return false;
     };

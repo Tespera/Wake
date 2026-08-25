@@ -57,7 +57,9 @@ impl AgentAdapter for FailingAdapter {
 }
 
 fn assert_terminal_event(events: &[ScanProgress], ctx: &str) {
-    let last = events.last().unwrap_or_else(|| panic!("{ctx}: 无任何进度事件"));
+    let last = events
+        .last()
+        .unwrap_or_else(|| panic!("{ctx}: 无任何进度事件"));
     assert!(
         !last.scanning,
         "{ctx}: 最后一个事件 scanning 仍为 true,UI 刷新弹窗将永久锁死"
@@ -239,7 +241,10 @@ fn tombstoned_session_does_not_resurrect_on_rescan() {
     let rec = Recorder::new();
 
     run_scan(&adapters, &store, &rec, true).unwrap();
-    assert!(store.get_session("codex:ghost").unwrap().is_some(), "首扫应写入");
+    assert!(
+        store.get_session("codex:ghost").unwrap().is_some(),
+        "首扫应写入"
+    );
 
     store.remove_session("codex:ghost", true).unwrap();
     run_scan(&adapters, &store, &rec, true).unwrap();
@@ -258,7 +263,13 @@ fn duplicate_session_across_roots_resolves_to_newest() {
     let store = temp_store(dir.path());
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
         Box::new(seed(AgentId::Codex, "/live", "/live/dup.jsonl", "dup", 9)),
-        Box::new(seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 5)),
+        Box::new(seed(
+            AgentId::Codex,
+            "/backup",
+            "/backup/dup.jsonl",
+            "dup",
+            5,
+        )),
     ];
     let rec = Recorder::new();
     for round in 0..2 {
@@ -303,13 +314,19 @@ fn incremental_write_respects_duplicate_winner() {
     let live = seed(AgentId::Codex, "/live", "/live/dup.jsonl", "dup", 9);
     let backup = seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 5);
     let backup_ref = backup.r.clone();
-    let newer_ref = SessionFileRef { mtime_ms: 12, ..backup.r.clone() };
+    let newer_ref = SessionFileRef {
+        mtime_ms: 12,
+        ..backup.r.clone()
+    };
     let mut newer_backup = seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 12);
     newer_backup.r = newer_ref.clone();
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(live), Box::new(backup)];
     let rec = Recorder::new();
     run_scan(&adapters, &store, &rec, true).unwrap();
-    assert_eq!(store.get_session("codex:dup").unwrap().unwrap().file_path, "/live/dup.jsonl");
+    assert_eq!(
+        store.get_session("codex:dup").unwrap().unwrap().file_path,
+        "/live/dup.jsonl"
+    );
 
     // 旧副本来了个文件事件:必须被裁决挡下
     wake_core::scanner::scan_files(&adapters, &store, &rec, vec![backup_ref]);
@@ -335,8 +352,13 @@ fn incremental_write_respects_duplicate_winner() {
 fn pure_deletion_scan_notifies_sessions_changed() {
     let dir = tempfile::tempdir().unwrap();
     let store = temp_store(dir.path());
-    let adapters: Vec<Box<dyn AgentAdapter>> =
-        vec![Box::new(seed(AgentId::Codex, "/live", "/live/one.jsonl", "one", 5))];
+    let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(seed(
+        AgentId::Codex,
+        "/live",
+        "/live/one.jsonl",
+        "one",
+        5,
+    ))];
     run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
     assert!(store.get_session("codex:one").unwrap().is_some());
 
@@ -344,8 +366,14 @@ fn pure_deletion_scan_notifies_sessions_changed() {
     let rec = Recorder::new();
     let empty: Vec<Box<dyn AgentAdapter>> = Vec::new();
     run_scan(&empty, &store, &rec, false).unwrap();
-    assert!(store.get_session("codex:one").unwrap().is_none(), "行应被出清");
-    assert!(rec.changed() > 0, "纯删除轮未发 on_sessions_changed,UI 不会刷新");
+    assert!(
+        store.get_session("codex:one").unwrap().is_none(),
+        "行应被出清"
+    );
+    assert!(
+        rec.changed() > 0,
+        "纯删除轮未发 on_sessions_changed,UI 不会刷新"
+    );
 }
 
 /// 胜者副本损坏时按裁决顺位回退:会话不得从索引消失(2026-08-24 Codex review P2)
@@ -357,7 +385,13 @@ fn corrupt_winner_falls_back_to_valid_copy() {
     broken_live.fail_parse = true;
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
         Box::new(broken_live),
-        Box::new(seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 5)),
+        Box::new(seed(
+            AgentId::Codex,
+            "/backup",
+            "/backup/dup.jsonl",
+            "dup",
+            5,
+        )),
     ];
     run_scan(&adapters, &store, &Recorder::new(), true).unwrap();
     let s = store
@@ -375,21 +409,42 @@ fn survivor_copy_promoted_after_winner_deleted() {
     let store = temp_store(dir.path());
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
         Box::new(seed(AgentId::Codex, "/live", "/live/dup.jsonl", "dup", 9)),
-        Box::new(seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 5)),
+        Box::new(seed(
+            AgentId::Codex,
+            "/backup",
+            "/backup/dup.jsonl",
+            "dup",
+            5,
+        )),
     ];
     let rec = Recorder::new();
     run_scan(&adapters, &store, &rec, true).unwrap();
-    assert_eq!(store.get_session("codex:dup").unwrap().unwrap().file_path, "/live/dup.jsonl");
+    assert_eq!(
+        store.get_session("codex:dup").unwrap().unwrap().file_path,
+        "/live/dup.jsonl"
+    );
 
-    let key = store.remove_by_path("/live/dup.jsonl").unwrap().expect("应返回被删 key");
+    let key = store
+        .remove_by_path("/live/dup.jsonl")
+        .unwrap()
+        .expect("应返回被删 key");
     assert!(store.get_session("codex:dup").unwrap().is_none());
     // 真实世界里被删文件不会再被枚举;SeedAdapter 是静态的,用"删除后"的
     // roster(只剩 backup 实例)喂给上位逻辑
-    let after: Vec<Box<dyn AgentAdapter>> =
-        vec![Box::new(seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 5))];
+    let after: Vec<Box<dyn AgentAdapter>> = vec![Box::new(seed(
+        AgentId::Codex,
+        "/backup",
+        "/backup/dup.jsonl",
+        "dup",
+        5,
+    ))];
     wake_core::watcher::promote_survivors(&after, &store, &rec, &[key]);
     assert_eq!(
-        store.get_session("codex:dup").unwrap().expect("幸存副本应上位").file_path,
+        store
+            .get_session("codex:dup")
+            .unwrap()
+            .expect("幸存副本应上位")
+            .file_path,
         "/backup/dup.jsonl"
     );
 }
@@ -410,8 +465,14 @@ fn owner_change_migrates_existing_rows() {
     let as_omp: Vec<Box<dyn AgentAdapter>> =
         vec![Box::new(seed(AgentId::Omp, "/d", "/d/s.jsonl", "s", 7))];
     run_scan(&as_omp, &store, &Recorder::new(), false).unwrap();
-    assert!(store.get_session("pi:s").unwrap().is_none(), "旧 agent 行应被清理");
-    assert!(store.get_session("omp:s").unwrap().is_some(), "新 agent 行应入库");
+    assert!(
+        store.get_session("pi:s").unwrap().is_none(),
+        "旧 agent 行应被清理"
+    );
+    assert!(
+        store.get_session("omp:s").unwrap().is_some(),
+        "新 agent 行应入库"
+    );
 }
 
 /// 墓碑双轨(不变量 3 的多副本延伸):删除只 trash 了胜者文件,另一 location
@@ -429,7 +490,13 @@ fn tombstone_blocks_all_copies() {
     };
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![
         Box::new(seed(AgentId::Codex, "/live", "/live/dup.jsonl", "dup", 9)),
-        Box::new(seed(AgentId::Codex, "/backup", "/backup/dup.jsonl", "dup", 5)),
+        Box::new(seed(
+            AgentId::Codex,
+            "/backup",
+            "/backup/dup.jsonl",
+            "dup",
+            5,
+        )),
     ];
     let rec = Recorder::new();
     run_scan(&adapters, &store, &rec, true).unwrap();
@@ -461,7 +528,10 @@ fn quick_meta_respects_key_tombstone() {
     let adapters: Vec<Box<dyn AgentAdapter>> = vec![Box::new(a)];
     let rec = Recorder::new();
     run_scan(&adapters, &store, &rec, true).unwrap();
-    assert!(store.get_session("codex:thread-1").unwrap().is_some(), "quick 改名 key 应入库");
+    assert!(
+        store.get_session("codex:thread-1").unwrap().is_some(),
+        "quick 改名 key 应入库"
+    );
 
     store.remove_session("codex:thread-1", true).unwrap();
     run_scan(&adapters, &store, &rec, true).unwrap();
@@ -469,7 +539,10 @@ fn quick_meta_respects_key_tombstone() {
         store.get_session("codex:thread-1").unwrap().is_none(),
         "quick 快路径复活了已删会话"
     );
-    assert!(store.get_session("codex:dup").unwrap().is_none(), "native key 也不得复活");
+    assert!(
+        store.get_session("codex:dup").unwrap().is_none(),
+        "native key 也不得复活"
+    );
 }
 
 /// key 后缀是内容 id 的家(gemini/pi/dsh):上位反查文件名对不上时,
@@ -479,7 +552,13 @@ fn survivor_promotion_matches_content_keys() {
     let dir = tempfile::tempdir().unwrap();
     let store = temp_store(dir.path());
     // meta.key 的后缀(LOGICAL)与文件名 native_id(session-123)不同
-    let mut backup = seed(AgentId::Gemini, "/backup", "/backup/session-123.jsonl", "session-123", 5);
+    let mut backup = seed(
+        AgentId::Gemini,
+        "/backup",
+        "/backup/session-123.jsonl",
+        "session-123",
+        5,
+    );
     backup.meta.key = "gemini:LOGICAL".to_string();
     backup.meta.id = "LOGICAL".to_string();
     let after: Vec<Box<dyn AgentAdapter>> = vec![Box::new(backup)];

@@ -31,7 +31,6 @@ use gpui_component::notification::Notification;
 use gpui_component::progress::Progress;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
-use gpui_component::switch::Switch;
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::{
     h_flex, v_flex, ActiveTheme as _, Icon, IndexPath, Root, Sizable as _, StyledExt as _,
@@ -50,11 +49,19 @@ use wake_core::watcher::{start_watcher, SessionWatcher};
 use crate::format::{
     abs_date, display_file_path, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path,
 };
+use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
 
 actions!(
     wake,
-    [ToggleSearch, RefreshSessions, PaletteUp, PaletteDown]
+    [
+        ToggleSearch,
+        RefreshSessions,
+        OpenSettings,
+        OpenAbout,
+        PaletteUp,
+        PaletteDown
+    ]
 );
 
 pub const KEY_CONTEXT: &str = "Workbench";
@@ -423,10 +430,9 @@ pub struct Workbench {
     /// 新根不收录、被移根不出清,要等手动 ⌘R(2026-08-24 Codex review)。
     /// 终态事件到达后由 on_bg_event 消费,用新 roster 补一轮增量
     pending_rescan: bool,
-    /// location 变更成功后置位:面板等**补扫终态**再重开——立即重开抓到的是
-    /// 扫描前的计数快照,新根会一直显示 0(2026-08-24 Codex review)。补扫
-    /// 是增量,通常亚秒;期间成功通知先行反馈。用户若已开了别的弹窗则放弃重开
-    reopen_locations_after_scan: bool,
+    /// Settings 是单例窗口；句柄不保活，关闭后下次点击会检测失败并重建。
+    settings_window: Option<AnyWindowHandle>,
+    settings_page: SettingsPage,
     /// 全量解析进度 (done, total);None = 仍在枚举文件。
     /// 用 Rc<Cell> 而非 entity 字段:进度弹窗 builder 在本 entity 的
     /// render 期间执行,entity.read(cx) 会 double-lease panic。
@@ -451,31 +457,38 @@ pub struct Workbench {
     _subs: Vec<Subscription>,
 }
 
-/// "Session locations" 面板的一行(= 一个数据源路径)。文本字段一律
-/// SharedString:dialog builder 每帧重跑,clone 只该是 refcount 而非堆分配
-struct DataSourceRow {
-    agent: AgentId,
+/// Settings/Locations 的一行(= 一个数据源路径)。文本字段用 SharedString，
+/// 让跨窗口快照与菜单闭包的 clone 只做引用计数。
+#[derive(Clone)]
+pub(crate) struct DataSourceRow {
+    pub(crate) agent: AgentId,
     /// `~/…` 展示形态
-    display: SharedString,
+    pub(crate) display: SharedString,
     /// 原始完整路径,交给 Finder
-    raw: SharedString,
+    pub(crate) raw: SharedString,
     /// 会话数,或路径不可用时的状态词
-    tally: SharedString,
+    pub(crate) tally: SharedString,
     /// 路径当前存在(行是否可点)
-    exists: bool,
+    pub(crate) exists: bool,
     /// Some(落库路径) = 自定义行(路径可能是本行根的上层目录);None = 预设行
-    custom: Option<SharedString>,
+    pub(crate) custom: Option<SharedString>,
     /// 预设行是否能只压制本路径，而不关闭该 agent 的整个默认实例。
-    individual_default: bool,
-    /// Rc<Cell> 让开关成功后原位刷新；dialog builder 捕获的是静态行快照，
-    /// 不能在 render 中反读 Workbench（会触发 double-lease）。
-    enabled: Rc<Cell<bool>>,
+    pub(crate) individual_default: bool,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Clone)]
-struct LocationToggleState {
-    enabled: Rc<Cell<bool>>,
-    diverged: Rc<Cell<bool>>,
+pub(crate) struct LocationSettingsSnapshot {
+    pub(crate) rows: Vec<DataSourceRow>,
+    pub(crate) diverged: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct DataSettingsSnapshot {
+    pub(crate) display_path: SharedString,
+    pub(crate) raw_path: SharedString,
+    pub(crate) size_bytes: u64,
+    pub(crate) session_count: i64,
 }
 
 /// location 表单的语义目标。预设行的“编辑”落库为**压制默认 + 记自定义**；
@@ -547,13 +560,25 @@ impl Workbench {
         let watcher = start_watcher(adapters.clone(), store.clone(), events.clone());
         let scan_events = events.clone();
 
-        cx.spawn_in(window, async move |this, cx| {
+        // 事件泵跟 Workbench entity 走，而不是跟主窗口走：Settings 会在主窗口
+        // 关闭后继续持有 Workbench；若这里绑定 window，update_in 会失败并让
+        // scan.scanning 永远收不到终态，后续 location 变更也无法再补扫。
+        let main_window = window.window_handle();
+        cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
-                if this
-                    .update_in(cx, |this, window, cx| this.on_bg_event(ev, window, cx))
-                    .is_err()
-                {
-                    break;
+                let note = match this.update(cx, |this, cx| this.on_bg_event(ev, cx)) {
+                    Ok(note) => note,
+                    Err(_) => break,
+                };
+                // 手动 Refresh 的进度框只存在于主窗口。主窗口已关闭时状态
+                // 仍正常收尾，只是不再尝试展示无处承载的完成通知。
+                if let Some(note) = note {
+                    main_window
+                        .update(cx, |_, window, cx| {
+                            window.close_dialog(cx);
+                            window.push_notification(note, cx);
+                        })
+                        .ok();
                 }
             }
         })
@@ -588,7 +613,8 @@ impl Workbench {
             },
             refreshing: false,
             pending_rescan: false,
-            reopen_locations_after_scan: false,
+            settings_window: None,
+            settings_page: SettingsPage::General,
             refresh_progress: Rc::new(Cell::new(None)),
             total_sessions: 0,
             list_state,
@@ -602,7 +628,7 @@ impl Workbench {
             preferred_terminal: None,
             _subs: subs,
         };
-        this.refresh(window, cx);
+        this.refresh(cx);
 
         // 索引重建过就告诉用户一声——收藏/置顶没了,总得让人知道为什么。
         // defer 到下一帧:此刻 Root 还没建好,notification 层挂不上
@@ -648,7 +674,7 @@ impl Workbench {
         }
     }
 
-    fn refresh(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn refresh(&mut self, cx: &mut Context<Self>) {
         let filter = self.current_filter();
         if let Ok((sessions, total)) = self.store.list_sessions(&filter) {
             self.total_sessions = total;
@@ -732,25 +758,12 @@ impl Workbench {
         });
     }
 
-    /// "Wake 读哪些路径"面板(侧栏底部数据源钮)。列全十三家含本机没装的,
-    /// 呼应"只读你的目录、零网络"的产品承诺;行点击即编辑,底部 Add location
-    /// 打开增改共用的表单。数据在打开前一次算好
-    /// move 进闭包——dialog builder 在宿主 render 期间执行,闭包内 read 宿主
-    /// entity 必 double-lease panic
-    fn show_data_sources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 数据源必须读 data_locations——它与 scanner/watcher 的 active roster
-        // 由同一批 adapter 实例派生，既保留停用行，又避免二次构造时 env
-        // (CODEX_HOME/XDG_DATA_HOME)或文件系统探测产生不同根路径快照。
-        // prefixes 与各行由同一份 flat 派生，计数与显示不会错位。
-        // 文本一律预先算成 SharedString:dialog builder 存的是 Rc<dyn Fn>,
-        // 面板开着时每帧重跑,留 format!/String::clone 在里面就是每帧堆分配
+    /// Settings/Locations 页的数据快照。路径与 active roster 来自同一次
+    /// adapter 构造，因此停用项仍然可见，环境变量根也不会二次探测后错位。
+    pub(crate) fn location_settings_snapshot(&self) -> LocationSettingsSnapshot {
         let mut flat = self.data_locations.as_ref().clone();
-        // 按 AgentId 声明序稳定排序:自定义根紧随该家默认根之后成组展示
-        // (roster 里 customs 追加在尾部,不排会飘到列表底部与所属家分离);
-        // 稳定排序保证同家内默认在前、codex 的 sessions/archived 相邻不散
+        // 自定义根紧随所属 agent 的默认根；同家内部保持 adapter 声明顺序。
         flat.sort_by_key(|location| location.agent);
-        // 带上 agent:计数按 (agent, 根) 归属,不然一家的根被 env 搬进另一家
-        // 树下时,会话会整批记到别家行上
         let prefixes: Vec<(String, String)> = flat
             .iter()
             .map(|location| {
@@ -764,265 +777,142 @@ impl Workbench {
             .store
             .counts_by_path_prefix(&prefixes)
             .unwrap_or_else(|_| vec![0; prefixes.len()]);
-        // 直接查库,不设镜像字段:面板打开是点击路径,微秒级查询无需缓存
         let (customs, removed, removed_roots) = self.store.location_overrides();
         let customs: Vec<(AgentId, SharedString)> = customs
             .into_iter()
-            .map(|(a, p)| (a, SharedString::from(p.to_string_lossy().to_string())))
+            .map(|(agent, path)| {
+                (
+                    agent,
+                    SharedString::from(path.to_string_lossy().to_string()),
+                )
+            })
             .collect();
-        let rows: Vec<DataSourceRow> = flat
+        let rows = flat
             .iter()
             .zip(prefixes)
             .zip(counts)
-            .map(|((location, (_, raw)), n)| {
-                // 存在性逐路径判断:某家的归档目录可能还没建,不该按整家一刀切
+            .map(|((location, (_, raw)), count)| {
                 let exists = location.path.exists();
-                // 本行根落在同家某个自定义 location 之下 → 可移除行。
-                // 携带**落库路径**而非本行根:codex 一个自定义家目录派生
-                // sessions/archived 两行,删除按落库那条删
-                let custom = custom_owner(&customs, location.agent, &raw).cloned();
                 DataSourceRow {
                     agent: location.agent,
                     display: tilde_path(&raw).into(),
-                    raw: raw.into(),
+                    raw: raw.clone().into(),
                     tally: if exists {
-                        n.to_string().into()
+                        match count {
+                            1 => "1 session".into(),
+                            n => format!("{n} sessions").into(),
+                        }
                     } else {
-                        "Not found".into()
+                        "Folder not found".into()
                     },
                     exists,
-                    custom,
+                    custom: custom_owner(&customs, location.agent, &raw).cloned(),
                     individual_default: location.individually_removable,
-                    enabled: Rc::new(Cell::new(location.enabled)),
+                    enabled: location.enabled,
                 }
             })
             .collect();
-        // 有任何偏离(自定义、被移除的预设或停用项)才给 Restore defaults 出场；
-        // 开关与 footer 共享 Cell，面板无需关闭重开即可同步显隐。
-        let diverged = Rc::new(Cell::new(
-            !customs.is_empty()
-                || !removed.is_empty()
-                || !removed_roots.is_empty()
-                || self.data_locations.iter().any(|location| !location.enabled),
-        ));
-        let entity = cx.entity();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let theme = cx.theme();
-            // 左右内边距从默认 24 收到 14,让出的 10px 由标题与各行自己的
-            // px(10) 补回:内容绝对位置不变,而 hover 底色能向外铺满这 10px。
-            // 早先用容器负 margin 做,被 overflow_y_scroll 的裁剪吃掉了
-            dialog.w(px(620.)).pl(px(14.)).pr(px(14.)).child(
-                v_flex()
-                    .gap(SPACE_SM)
-                    .child(
-                        // 显式收行高:默认按 1.5 倍算,16px 标题会撑出 24px 的块,
-                        // 上下白边把标题与列表推得过开
-                        div()
-                            .px(px(10.))
-                            .text_size(FONT_HEADING)
-                            .line_height(px(20.))
-                            .font_semibold()
-                            .text_color(theme.foreground)
-                            .child("Session locations"),
-                    )
-                    .child(
-                        v_flex()
-                            .id("data-source-list")
-                            .max_h(px(400.))
-                            .overflow_y_scroll()
-                            .children(rows.iter().enumerate().map(|(ix, row)| {
-                                // 点击行 = 编辑(2026-08-24 定稿)
-                                // 表单与 with_custom_root 的契约是**目录**;SQLite
-                                // 型预设行的 raw 是库文件,预填其父目录——照文件
-                                // 路径保存会拼出 <db>/<db> 的死路径(Codex review)
-                                let edit_path = row.custom.clone().unwrap_or_else(|| {
-                                    let raw = row.raw.as_ref();
-                                    if std::path::Path::new(raw).is_file() {
-                                        std::path::Path::new(raw)
-                                            .parent()
-                                            .map(|p| {
-                                                SharedString::from(p.to_string_lossy().to_string())
-                                            })
-                                            .unwrap_or_else(|| row.raw.clone())
-                                    } else {
-                                        row.raw.clone()
-                                    }
-                                });
-                                let edit_target = FormTarget::Edit {
-                                    agent: row.agent,
-                                    custom: row.custom.is_some(),
-                                    path: edit_path,
-                                    root: row.raw.clone(),
-                                    individual_default: row.individual_default,
-                                };
-                                let edit_entity = entity.clone();
-                                let toggle_entity = entity.clone();
-                                let toggle_state = LocationToggleState {
-                                    enabled: row.enabled.clone(),
-                                    diverged: diverged.clone(),
-                                };
-                                let toggle_agent = row.agent;
-                                let toggle_path = row.raw.clone();
-                                h_flex()
-                                    .id(("data-source-row", ix))
-                                    .h(ROW_HEIGHT_SUB)
-                                    .w_full()
-                                    // 行内 padding + dialog 让出的等量边距:hover
-                                    // 底色左右各留 10px 呼吸,内容仍与标题左对齐
-                                    .px(px(10.))
-                                    .rounded(theme.radius)
-                                    .gap(SPACE_SM)
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.secondary_hover))
-                                    .on_click(move |_, window, cx| {
-                                        let t = edit_target.clone();
-                                        edit_entity.update(cx, |this, cx| {
-                                            this.open_location_form(t, window, cx)
-                                        });
-                                    })
-                                    .child(
-                                        img(row.agent.brand_icon(theme.mode.is_dark()))
-                                            .size(px(14.))
-                                            .flex_shrink_0(),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(118.))
-                                            .flex_shrink_0()
-                                            .truncate()
-                                            .text_size(FONT_CAPTION)
-                                            .text_color(theme.foreground)
-                                            .child(row.agent.display_name()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(FONT_CAPTION)
-                                            .text_color(theme.muted_foreground)
-                                            .child(row.display.clone()),
-                                    )
-                                    .child(
-                                        // 停用时以状态替代已过期计数；重新开启后的
-                                        // 增量扫描会恢复真值，下次打开面板即更新。
-                                        h_flex()
-                                            .w(px(88.))
-                                            .flex_shrink_0()
-                                            .justify_end()
-                                            .text_size(FONT_LABEL)
-                                            .child({
-                                                if !row.enabled.get() {
-                                                    badge(
-                                                        SharedString::from("Disabled"),
-                                                        theme.muted,
-                                                        theme.muted_foreground,
-                                                    )
-                                                } else {
-                                                    // 有目录取中性灰(同项目名 badge);目录不在
-                                                    // 取 warning 淡底 tint——这是"本机没这家"的
-                                                    // 陈述而非报错,不用实心告警色。文字实色,
-                                                    // 只有底叠 opacity
-                                                    let (bg, fg) = if row.exists {
-                                                        (theme.muted, theme.muted_foreground)
-                                                    } else {
-                                                        (theme.warning.opacity(0.14), theme.warning)
-                                                    };
-                                                    badge(row.tally.clone(), bg, fg)
-                                                }
-                                            }),
-                                    )
-                                    .child(
-                                        Switch::new(("data-source-enabled", ix))
-                                            .checked(row.enabled.get())
-                                            .small()
-                                            .tooltip(if row.enabled.get() {
-                                                "Disable location"
-                                            } else {
-                                                "Enable location"
-                                            })
-                                            .on_click(move |enabled, window, cx| {
-                                                let state = toggle_state.clone();
-                                                let path = toggle_path.clone();
-                                                toggle_entity.update(cx, |this, cx| {
-                                                    this.set_location_enabled(
-                                                        toggle_agent,
-                                                        path,
-                                                        *enabled,
-                                                        state.clone(),
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                            }),
-                                    )
-                            })),
-                    )
-                    .child(div().h(px(1.)).bg(theme.border).mx(px(10.)))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                // 底部添加按钮:加号与行图标同列对齐(px10 内边
-                                // 同构),hover 胶囊只包按钮本体——整行 hover
-                                // 否决(2026-08-24);上方 hairline 与侧栏
-                                // footer 同语言,分开数据区与动作区
-                                h_flex()
-                                    .id("add-location")
-                                    .h(ROW_HEIGHT_SUB)
-                                    .px(px(10.))
-                                    .rounded(theme.radius)
-                                    .gap(SPACE_SM)
-                                    .items_center()
-                                    .cursor_pointer()
-                                    .text_color(theme.muted_foreground)
-                                    .hover(|s| s.bg(theme.secondary_hover))
-                                    .on_click({
-                                        let entity = entity.clone();
-                                        move |_, window, cx| {
-                                            // 面板不关:dialog 是栈,表单压在其上,
-                                            // esc/取消原生弹回面板
-                                            entity.update(cx, |this, cx| {
-                                                this.open_location_form(FormTarget::Add, window, cx)
-                                            });
-                                        }
-                                    })
-                                    .child(
-                                        icon("icons/plus.svg").with_size(px(14.)).flex_shrink_0(),
-                                    )
-                                    .child(div().text_size(FONT_CAPTION).child("Add location")),
-                            )
-                            .when(diverged.get(), |el| {
-                                el.child(
-                                    // 恢复初始:清空全部偏离,回到内置默认路径
-                                    h_flex()
-                                        .id("restore-defaults")
-                                        .h(ROW_HEIGHT_SUB)
-                                        .px(px(10.))
-                                        .rounded(theme.radius)
-                                        .items_center()
-                                        .cursor_pointer()
-                                        .text_color(theme.muted_foreground)
-                                        .hover(|s| s.bg(theme.secondary_hover))
-                                        .on_click({
-                                            let entity = entity.clone();
-                                            move |_, window, cx| {
-                                                window.close_dialog(cx);
-                                                entity.update(cx, |this, cx| {
-                                                    this.restore_default_locations(window, cx)
-                                                });
-                                            }
-                                        })
-                                        .child(
-                                            div().text_size(FONT_CAPTION).child("Restore defaults"),
-                                        ),
-                                )
-                            }),
-                    ),
-            )
-        });
+        let diverged = !customs.is_empty()
+            || !removed.is_empty()
+            || !removed_roots.is_empty()
+            || self.data_locations.iter().any(|location| !location.enabled);
+        LocationSettingsSnapshot { rows, diverged }
+    }
+
+    pub(crate) fn data_settings_snapshot(&self) -> DataSettingsSnapshot {
+        let path = wake_core::db::default_db_path();
+        let raw = path.to_string_lossy().to_string();
+        let size_bytes = ["", "-wal", "-shm"]
+            .iter()
+            .filter_map(|suffix| std::fs::metadata(format!("{raw}{suffix}")).ok())
+            .map(|metadata| metadata.len())
+            .sum();
+        DataSettingsSnapshot {
+            display_path: tilde_path(&raw).into(),
+            raw_path: raw.into(),
+            size_bytes,
+            session_count: self.agent_counts.iter().map(|(_, count)| count).sum(),
+        }
+    }
+
+    pub(crate) fn settings_page(&self) -> SettingsPage {
+        self.settings_page
+    }
+
+    pub(crate) fn select_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
+        self.settings_page = page;
+        cx.notify();
+    }
+
+    pub(crate) fn open_about(&mut self, cx: &mut Context<Self>) {
+        self.settings_page = SettingsPage::About;
+        cx.notify();
+        self.open_settings(cx);
+    }
+
+    /// 打开单例 Settings 窗口。开窗必须 defer 到当前 Workbench update 退出
+    /// 之后：Settings 首帧会读取 location 快照，同步开窗会反读仍被独占借用
+    /// 的 Workbench，触发 GPUI double lease。
+    pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        let workbench = cx.entity();
+        cx.defer(move |cx| Self::show_settings_window(workbench, cx));
+    }
+
+    fn show_settings_window(workbench: Entity<Self>, cx: &mut App) {
+        // 先把 Copy 句柄取出，确保 read lease 在后续 update 前结束。
+        let existing = workbench.read(cx).settings_window;
+        if let Some(handle) = existing {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                cx.activate(true);
+                return;
+            }
+            workbench.update(cx, |this, _| this.settings_window = None);
+        }
+        let bounds = Bounds::centered(None, size(px(880.), px(640.)), cx);
+        let titlebar = if cfg!(target_os = "macos") {
+            TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(20.), px(11.))),
+            }
+        } else {
+            TitlebarOptions {
+                title: Some("Wake Settings".into()),
+                appears_transparent: false,
+                traffic_light_position: None,
+            }
+        };
+        let settings_workbench = workbench.clone();
+        match cx.open_window(
+            WindowOptions {
+                titlebar: Some(titlebar),
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(740.), px(520.))),
+                app_id: Some("wake-settings".into()),
+                window_decorations: Some(WindowDecorations::Client),
+                ..Default::default()
+            },
+            move |window, cx| {
+                window
+                    .observe_window_appearance(|window, cx| {
+                        crate::theme::sync_appearance(Some(window), cx);
+                    })
+                    .detach();
+                crate::theme::sync_appearance(Some(window), cx);
+                let settings = cx.new(|cx| SettingsView::new(settings_workbench, window, cx));
+                window.focus(&settings.read(cx).focus_handle(cx));
+                cx.new(|cx| Root::new(settings, window, cx))
+            },
+        ) {
+            Ok(handle) => {
+                workbench.update(cx, |this, _| this.settings_window = Some(handle.into()));
+                cx.activate(true);
+            }
+            Err(error) => eprintln!("failed to open Wake settings: {error}"),
+        }
     }
 
     /// store 的 location 配置 → active roster + 全量路径快照。new 与
@@ -1050,7 +940,43 @@ impl Workbench {
 
     /// location 表单(添加/编辑共用一套 UI,2026-08-24 定稿):agent 下拉 +
     /// 路径输入框(可手输,~ 展开)+ 目录选择按钮;Cancel/Save 只在有改动时
-    /// 出现。压栈在面板之上,esc/取消原生弹回
+    /// 出现。表单作为 Settings 窗口的模态层，esc/取消回到 Locations 页。
+    pub(crate) fn open_add_location_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_location_form(FormTarget::Add, window, cx);
+    }
+
+    pub(crate) fn open_edit_location_form(
+        &mut self,
+        row: DataSourceRow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // location 的配置单位是目录；SQLite 型 adapter 的展示根可能是文件，
+        // 编辑时预填父目录，避免保存成 <db>/<db>。
+        let path = row.custom.clone().unwrap_or_else(|| {
+            let raw = row.raw.as_ref();
+            if std::path::Path::new(raw).is_file() {
+                std::path::Path::new(raw)
+                    .parent()
+                    .map(|path| SharedString::from(path.to_string_lossy().to_string()))
+                    .unwrap_or_else(|| row.raw.clone())
+            } else {
+                row.raw.clone()
+            }
+        });
+        self.open_location_form(
+            FormTarget::Edit {
+                agent: row.agent,
+                path,
+                root: row.raw,
+                custom: row.custom.is_some(),
+                individual_default: row.individual_default,
+            },
+            window,
+            cx,
+        );
+    }
+
     fn open_location_form(
         &mut self,
         target: FormTarget,
@@ -1508,8 +1434,8 @@ impl Workbench {
             window.push_notification(Notification::error(format!("Save failed: {e}")), cx);
             return false;
         }
-        // 整栈收场(表单+过期的面板快照),统一收尾重开新面板。
-        // 返回 false 阻止机制再 pop(那会关掉刚开的新面板)
+        // Settings 页本身是动态快照，只需收起表单；Workbench notify 会让
+        // SettingsView 观察者刷新列表。
         window.close_all_dialogs(cx);
         let note = match &target {
             FormTarget::Add => "Location added",
@@ -1521,7 +1447,7 @@ impl Workbench {
 
     /// 真正删除一个自定义 location。内置 location 不提供 Remove，只能用
     /// 行内开关暂时停用；磁盘文件始终不动。
-    fn delete_location(
+    pub(crate) fn delete_location(
         &mut self,
         agent: AgentId,
         stored: SharedString,
@@ -1542,7 +1468,11 @@ impl Workbench {
 
     /// Restore defaults:清空全部偏离（自定义、被移除的预设与停用状态），
     /// 回到全部启用的内置默认 location。
-    fn restore_default_locations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn restore_default_locations(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let res = self.store.clear_location_overrides();
         self.apply_location_change(
             res,
@@ -1553,14 +1483,12 @@ impl Workbench {
         );
     }
 
-    /// Session locations 行内开关。状态先落库，再整体换 active roster 与 watcher；
-    /// 当前面板通过共享 Cell 原位反映行状态与 Restore defaults，配置行始终保留。
-    fn set_location_enabled(
+    /// Session locations 行内开关。状态先落库，再整体换 active roster 与 watcher。
+    pub(crate) fn set_location_enabled(
         &mut self,
         agent: AgentId,
         path: SharedString,
         enabled: bool,
-        state: LocationToggleState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1573,15 +1501,7 @@ impl Workbench {
                 cx,
             ),
             Ok(()) => {
-                state.enabled.set(enabled);
                 self.rebuild_roster(cx);
-                let (customs, removed, removed_roots) = self.store.location_overrides();
-                state.diverged.set(
-                    !customs.is_empty()
-                        || !removed.is_empty()
-                        || !removed_roots.is_empty()
-                        || self.data_locations.iter().any(|location| !location.enabled),
-                );
                 self.kick_incremental_scan(cx);
                 window.push_notification(
                     Notification::info(if enabled {
@@ -1596,9 +1516,8 @@ impl Workbench {
         }
     }
 
-    /// location 变更的统一收尾(删/恢复/表单提交成功共用):失败提示后立即回
-    /// 面板;成功则 roster 换代 + 补增量 + 提示,面板等补扫终态再重开(此时
-    /// 计数才是真值)——第四个变更入口出现时,收尾步骤只在这里长
+    /// location 变更的统一收尾(删/恢复/表单提交成功共用)。Settings 页
+    /// 观察 Workbench 的 notify 并重读快照，不需要关闭/重开管理面板。
     fn apply_location_change(
         &mut self,
         res: anyhow::Result<()>,
@@ -1610,11 +1529,9 @@ impl Workbench {
         match res {
             Err(e) => {
                 window.push_notification(Notification::error(format!("{err_prefix}: {e}")), cx);
-                self.show_data_sources(window, cx);
             }
             Ok(()) => {
                 self.rebuild_roster(cx);
-                self.reopen_locations_after_scan = true;
                 self.kick_incremental_scan(cx);
                 window.push_notification(ok_note, cx);
             }
@@ -1622,7 +1539,7 @@ impl Workbench {
     }
 
     /// roster 换代后补一轮增量:新根收录、被移根出清。撞上进行中的扫描
-    /// (变更后面板自动重开,连续操作两次就会撞)则排队,由终态事件补扫
+    /// 撞上进行中的扫描则排队，由终态事件补扫。
     fn kick_incremental_scan(&mut self, cx: &mut Context<Self>) {
         if self.scan.scanning {
             self.pending_rescan = true;
@@ -1641,7 +1558,7 @@ impl Workbench {
         );
     }
 
-    fn on_bg_event(&mut self, ev: BgEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_bg_event(&mut self, ev: BgEvent, cx: &mut Context<Self>) -> Option<Notification> {
         match ev {
             BgEvent::Progress(p) => {
                 self.refresh_progress.set(if p.total > 0 {
@@ -1649,15 +1566,15 @@ impl Workbench {
                 } else {
                     None
                 });
-                if !p.scanning && self.refreshing {
+                let note = if !p.scanning && self.refreshing {
                     self.refreshing = false;
-                    window.close_dialog(cx);
-                    let note = match &p.error {
+                    Some(match &p.error {
                         None => Notification::success("Sessions refreshed"),
                         Some(err) => Notification::error(format!("Refresh failed: {err}")),
-                    };
-                    window.push_notification(note, cx);
-                }
+                    })
+                } else {
+                    None
+                };
                 self.scan = p;
                 // 扫描期间发生过 location 变更:那轮用的是旧 roster,
                 // 终态一到立刻用当前 roster 补一轮增量
@@ -1665,17 +1582,13 @@ impl Workbench {
                     self.pending_rescan = false;
                     self.kick_incremental_scan(cx);
                 }
-                // location 变更的面板重开等到终态:此刻计数才是真值。
-                // 用户若在空档里开了别的弹窗(⌘K 等),不去压它
-                if !self.scan.scanning && self.reopen_locations_after_scan {
-                    self.reopen_locations_after_scan = false;
-                    if !window.has_active_dialog(cx) {
-                        self.show_data_sources(window, cx);
-                    }
-                }
                 cx.notify();
+                note
             }
-            BgEvent::Changed => self.refresh(window, cx),
+            BgEvent::Changed => {
+                self.refresh(cx);
+                None
+            }
         }
     }
 
@@ -2038,11 +1951,11 @@ impl Workbench {
 
     /// 清空过滤回 All Sessions 视图(侧栏点击与搜索打开共用;
     /// 已在 All Sessions 时 refresh 幂等,微秒级)
-    fn show_all_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_all_sessions(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.selected_agent = None;
         self.selected_project = None;
         self.favorite_only = false;
-        self.refresh(window, cx);
+        self.refresh(cx);
     }
 
     /// 搜索命中打开:侧栏切回 All Sessions(搜索是全库范围,过滤视图下
@@ -2116,21 +2029,21 @@ impl Workbench {
         });
     }
 
-    fn toggle_favorite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_favorite(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(detail) = &mut self.detail {
             let v = !detail.meta.favorite;
             let _ = self.store.set_user_data(&detail.meta.key, Some(v), None);
             detail.meta.favorite = v;
-            self.refresh(window, cx);
+            self.refresh(cx);
         }
     }
 
-    fn toggle_pinned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_pinned(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(detail) = &mut self.detail {
             let v = !detail.meta.pinned;
             let _ = self.store.set_user_data(&detail.meta.key, None, Some(v));
             detail.meta.pinned = v;
-            self.refresh(window, cx);
+            self.refresh(cx);
         }
     }
 
@@ -2188,7 +2101,7 @@ impl Workbench {
                     }
                     window.push_notification(Notification::success(SESSION_TRASHED), cx);
                     // 立刻把它从列表摘掉,不等 watcher 那 800ms 去抖
-                    this.refresh(window, cx);
+                    this.refresh(cx);
                 }
                 Err(e) => {
                     window.push_notification(Notification::error(format!("Delete failed: {e}")), cx)
@@ -2437,13 +2350,13 @@ impl Workbench {
                         },
                         self.favorite_only,
                         RowLevel::Primary,
-                        cx.listener(|this, _, window, cx| {
+                        cx.listener(|this, _, _window, cx| {
                             this.favorite_only = !this.favorite_only;
                             if this.favorite_only {
                                 this.selected_agent = None;
                                 this.selected_project = None;
                             }
-                            this.refresh(window, cx);
+                            this.refresh(cx);
                         }),
                         cx,
                     )),
@@ -2478,7 +2391,7 @@ impl Workbench {
                                 Some(*count),
                                 self.selected_agent == Some(agent),
                                 RowLevel::Sub,
-                                cx.listener(move |this, _, window, cx| {
+                                cx.listener(move |this, _, _window, cx| {
                                     this.selected_agent = if this.selected_agent == Some(agent) {
                                         None
                                     } else {
@@ -2486,7 +2399,7 @@ impl Workbench {
                                     };
                                     this.selected_project = None;
                                     this.favorite_only = false;
-                                    this.refresh(window, cx);
+                                    this.refresh(cx);
                                 }),
                                 cx,
                             )
@@ -2512,7 +2425,7 @@ impl Workbench {
                                 Some(p.session_count),
                                 self.selected_project.as_deref() == Some(p.path.as_str()),
                                 RowLevel::Sub,
-                                cx.listener(move |this, _, window, cx| {
+                                cx.listener(move |this, _, _window, cx| {
                                     this.selected_project = if this.selected_project.as_deref()
                                         == Some(path.as_str())
                                     {
@@ -2522,7 +2435,7 @@ impl Workbench {
                                     };
                                     this.selected_agent = None;
                                     this.favorite_only = false;
-                                    this.refresh(window, cx);
+                                    this.refresh(cx);
                                 }),
                                 cx,
                             )
@@ -2554,18 +2467,13 @@ impl Workbench {
                             .justify_end()
                             .gap(SPACE_XS)
                             .child(sidebar_tool_btn(
-                                "data-sources",
-                                "Session locations",
-                                // 扫描期间禁用:面板的计数是打开那一刻查库所得、
-                                // 之后不再跟进(dialog builder 里是静态 rows),
-                                // 首扫途中开出来会是 0 或半截数字且一直不更新
-                                !self.scan.scanning,
-                                icon("icons/hard-drive.svg")
+                                "settings",
+                                "Settings",
+                                true,
+                                icon("icons/settings.svg")
                                     .with_size(px(14.))
                                     .into_any_element(),
-                                cx.listener(|this, _, window, cx| {
-                                    this.show_data_sources(window, cx)
-                                }),
+                                cx.listener(|this, _, _window, cx| this.open_settings(cx)),
                                 cx,
                             ))
                             .child(sidebar_tool_btn(
@@ -2611,10 +2519,10 @@ impl Workbench {
                 let mk_key = |label: &'static str, key: SortKey| {
                     let entity = sort_entity.clone();
                     PopupMenuItem::new(label).checked(sort_key == key).on_click(
-                        move |_, window, cx| {
+                        move |_, _window, cx| {
                             entity.update(cx, |this, cx| {
                                 this.sort_key = key;
-                                this.refresh(window, cx);
+                                this.refresh(cx);
                             });
                         },
                     )
@@ -2623,10 +2531,10 @@ impl Workbench {
                     let entity = sort_entity.clone();
                     PopupMenuItem::new(label)
                         .checked(sort_ascending == ascending)
-                        .on_click(move |_, window, cx| {
+                        .on_click(move |_, _window, cx| {
                             entity.update(cx, |this, cx| {
                                 this.sort_ascending = ascending;
-                                this.refresh(window, cx);
+                                this.refresh(cx);
                             });
                         })
                 };
@@ -3704,6 +3612,8 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &RefreshSessions, window, cx| {
                 this.refresh_sessions(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| this.open_settings(cx)))
+            .on_action(cx.listener(|this, _: &OpenAbout, _window, cx| this.open_about(cx)))
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)

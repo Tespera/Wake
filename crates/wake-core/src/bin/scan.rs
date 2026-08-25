@@ -32,7 +32,10 @@ fn main() -> Result<()> {
     let adapters = create_adapters_for(&store);
     eprintln!(
         "adapters: {:?}",
-        adapters.iter().map(|a| a.agent().as_str()).collect::<Vec<_>>()
+        adapters
+            .iter()
+            .map(|a| a.agent().as_str())
+            .collect::<Vec<_>>()
     );
 
     let t0 = std::time::Instant::now();
@@ -66,7 +69,12 @@ fn main() -> Result<()> {
     }
 
     // 搜索冒烟
-    if let Some(q) = args.iter().position(|a| a == "--search").map(|i| args.get(i + 1)).flatten() {
+    if let Some(q) = args
+        .iter()
+        .position(|a| a == "--search")
+        .map(|i| args.get(i + 1))
+        .flatten()
+    {
         let t1 = std::time::Instant::now();
         let (hits, degraded) = store.search(q, &[], None, 10)?;
         println!(
@@ -79,7 +87,11 @@ fn main() -> Result<()> {
                 "  {} #{}: {}",
                 h.session.title.chars().take(24).collect::<String>(),
                 h.seq,
-                h.snippet.chars().take(60).collect::<String>().replace('\n', " ")
+                h.snippet
+                    .chars()
+                    .take(60)
+                    .collect::<String>()
+                    .replace('\n', " ")
             );
         }
     }

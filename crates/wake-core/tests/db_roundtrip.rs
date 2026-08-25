@@ -96,8 +96,34 @@ fn user_data_survives_rebuild() {
         .set_user_data("claude-code:s3", Some(true), Some(true))
         .unwrap();
 
-    // 重建索引(sessions/messages 清空重来)后,收藏/置顶必须还在
+    let removed = meta("claude-code:removed", "已删除的会话");
+    store
+        .write_session(&removed, removed.updated_at, &[])
+        .unwrap();
+    store.remove_session("claude-code:removed", true).unwrap();
+    store.add_custom_root("codex", "/tmp/codex-copy").unwrap();
+    store.add_removed_default("gemini").unwrap();
+    store
+        .set_location_enabled("codex", "/tmp/codex-copy/sessions", false)
+        .unwrap();
+
+    // 重建索引只动可派生表；用户选择与防复活墓碑都必须保留。
     store.rebuild_all().unwrap();
+    assert!(store.is_key_tombstoned("claude-code:removed"));
+    assert_eq!(
+        store.list_custom_roots().unwrap(),
+        vec![("codex".to_string(), "/tmp/codex-copy".to_string())]
+    );
+    assert_eq!(
+        store.list_removed_defaults().unwrap(),
+        vec!["gemini".to_string()]
+    );
+    assert_eq!(
+        store.list_disabled_locations().unwrap(),
+        vec![("codex".to_string(), "/tmp/codex-copy/sessions".to_string())]
+    );
+
+    // session 被扫描器重新写回后，独立 user_data 重新合并进结果。
     store.write_session(&m, m.updated_at, &[]).unwrap();
     let got = store.get_session("claude-code:s3").unwrap().unwrap();
     assert!(got.favorite, "重建后收藏丢失 = user_data 未独立");

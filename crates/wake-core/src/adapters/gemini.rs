@@ -31,7 +31,9 @@ impl GeminiAdapter {
 
     /// slug → 项目真实路径
     fn slug_map(&self) -> HashMap<String, String> {
-        let mtime = fs::metadata(&self.projects_json).map(|m| mtime_ms(&m)).unwrap_or(0);
+        let mtime = fs::metadata(&self.projects_json)
+            .map(|m| mtime_ms(&m))
+            .unwrap_or(0);
         {
             let cache = self.slug_cache.lock().unwrap();
             if let Some((t, map)) = cache.as_ref() {
@@ -168,8 +170,16 @@ fn build_meta(r: &SessionFileRef, p: &GeminiParse, cwd: &str) -> SessionMeta {
         project_path: cwd.to_string(),
         project_name: project_name_of(cwd),
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
-        updated_at: if p.updated_at > 0 { p.updated_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if p.updated_at > 0 {
+            p.updated_at
+        } else {
+            r.mtime_ms
+        },
         message_count: p
             .messages
             .iter()

@@ -60,7 +60,8 @@ fn cursor_ts_ms(s: &str) -> i64 {
     (|| -> Option<i64> {
         let (dt_part, tz_part) = s.rsplit_once(" (")?;
         let naive =
-            chrono::NaiveDateTime::parse_from_str(dt_part.trim(), "%A, %b %d, %Y, %I:%M %p").ok()?;
+            chrono::NaiveDateTime::parse_from_str(dt_part.trim(), "%A, %b %d, %Y, %I:%M %p")
+                .ok()?;
         let off = tz_part.trim_end_matches(')').strip_prefix("UTC")?;
         let (sign, rest) = match off.as_bytes().first()? {
             b'+' => (1i32, &off[1..]),
@@ -73,7 +74,12 @@ fn cursor_ts_ms(s: &str) -> i64 {
         };
         let offset = chrono::FixedOffset::east_opt(sign * secs)?;
         use chrono::TimeZone;
-        Some(offset.from_local_datetime(&naive).single()?.timestamp_millis())
+        Some(
+            offset
+                .from_local_datetime(&naive)
+                .single()?
+                .timestamp_millis(),
+        )
     })()
     .unwrap_or(0)
 }
@@ -203,7 +209,13 @@ fn parse_cursor_jsonl(path: &Path) -> Result<CursorParse> {
                             let input = b.get("input").cloned().unwrap_or(Value::Null);
                             let name = b.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
                             // transcript 不落盘工具结果,output 恒 None
-                            p.tool_calls.push(tool_call_view(String::new(), name, &input, None, false));
+                            p.tool_calls.push(tool_call_view(
+                                String::new(),
+                                name,
+                                &input,
+                                None,
+                                false,
+                            ));
                         }
                         _ => {}
                     }
@@ -246,8 +258,16 @@ fn build_meta(r: &SessionFileRef, p: &CursorParse) -> SessionMeta {
         project_path: cwd.clone(),
         project_name: project_name_of(&cwd),
         file_path: r.file_path.clone(),
-        created_at: if p.created_at > 0 { p.created_at } else { r.mtime_ms },
-        updated_at: if p.updated_at > 0 { p.updated_at } else { r.mtime_ms },
+        created_at: if p.created_at > 0 {
+            p.created_at
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if p.updated_at > 0 {
+            p.updated_at
+        } else {
+            r.mtime_ms
+        },
         message_count: p
             .messages
             .iter()
@@ -360,7 +380,11 @@ impl AgentAdapter for CursorAdapter {
         })
     }
 
-    fn load_sidechain(&self, r: &SessionFileRef, sidechain_id: &str) -> Result<Vec<TranscriptMessage>> {
+    fn load_sidechain(
+        &self,
+        r: &SessionFileRef,
+        sidechain_id: &str,
+    ) -> Result<Vec<TranscriptMessage>> {
         let file = subagents_dir(r).join(format!("{sidechain_id}.jsonl"));
         if !file.is_file() {
             return Ok(Vec::new());
@@ -370,7 +394,11 @@ impl AgentAdapter for CursorAdapter {
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // 选中 `~/.cursor` 形态(含 projects/)或直接选中 projects 目录都认
-        let root = if dir.join("projects").is_dir() { dir.join("projects") } else { dir };
+        let root = if dir.join("projects").is_dir() {
+            dir.join("projects")
+        } else {
+            dir
+        };
         Box::new(Self { root })
     }
 

@@ -43,7 +43,9 @@ fn render_message(m: &TranscriptMessage, out: &mut String) {
         return;
     }
     if let Some(th) = &m.thinking {
-        out.push_str(&format!("<details><summary>🧠 Thinking</summary>\n\n{th}\n\n</details>\n\n"));
+        out.push_str(&format!(
+            "<details><summary>🧠 Thinking</summary>\n\n{th}\n\n</details>\n\n"
+        ));
     }
     if !m.text.is_empty() {
         out.push_str(&m.text);
@@ -150,7 +152,11 @@ pub fn default_file_name(meta: &SessionMeta, ext: &str) -> String {
         .take(40)
         .collect();
     let date = Local
-        .timestamp_millis_opt(if meta.updated_at > 0 { meta.updated_at } else { crate::db::now_ms() })
+        .timestamp_millis_opt(if meta.updated_at > 0 {
+            meta.updated_at
+        } else {
+            crate::db::now_ms()
+        })
         .single()
         .map(|d| d.format("%Y%m%d").to_string())
         .unwrap_or_default();

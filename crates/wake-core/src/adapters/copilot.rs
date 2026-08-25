@@ -30,7 +30,9 @@ impl CopilotAdapter {
     }
 
     fn db_mtime(&self) -> i64 {
-        std::fs::metadata(&self.db).map(|m| mtime_ms(&m)).unwrap_or(0)
+        std::fs::metadata(&self.db)
+            .map(|m| mtime_ms(&m))
+            .unwrap_or(0)
     }
 
     fn rows(&self) -> Option<Vec<CopilotRow>> {
@@ -80,12 +82,24 @@ impl CopilotAdapter {
             key: format!("copilot:{}", row.id),
             id: row.id.clone(),
             agent: AgentId::Copilot,
-            title: if title.is_empty() { UNTITLED.to_string() } else { title },
+            title: if title.is_empty() {
+                UNTITLED.to_string()
+            } else {
+                title
+            },
             project_path: row.cwd.clone(),
             project_name: project_name_of(&row.cwd),
             file_path: r.file_path.clone(),
-            created_at: if row.created_ms > 0 { row.created_ms } else { r.mtime_ms },
-            updated_at: if row.updated_ms > 0 { row.updated_ms } else { r.mtime_ms },
+            created_at: if row.created_ms > 0 {
+                row.created_ms
+            } else {
+                r.mtime_ms
+            },
+            updated_at: if row.updated_ms > 0 {
+                row.updated_ms
+            } else {
+                r.mtime_ms
+            },
             message_count,
             size_bytes: r.size,
             git_branch: row.branch.clone().filter(|b| !b.is_empty()),
@@ -149,7 +163,10 @@ impl CopilotAdapter {
             }
         }
         assign_seq(&mut messages);
-        let count = messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64;
+        let count = messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64;
         let mut meta = self.build_meta(r, &row, count);
         // summary 缺失时回退首条用户消息
         if meta.title == UNTITLED {
@@ -229,7 +246,11 @@ impl AgentAdapter for CopilotAdapter {
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
         // 手输/预填的就是库文件路径时直接认,不再往下拼(Codex review)
-        let db = if dir.is_file() { dir } else { dir.join("session-store.db") };
+        let db = if dir.is_file() {
+            dir
+        } else {
+            dir.join("session-store.db")
+        };
         Box::new(Self {
             db,
             rows_cache: Mutex::new(None),

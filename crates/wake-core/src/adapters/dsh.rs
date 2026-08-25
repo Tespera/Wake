@@ -22,7 +22,10 @@ pub struct DshAdapter {
 impl DshAdapter {
     pub fn new() -> Self {
         Self {
-            root: super::home_dir().unwrap_or_default().join(".dsh").join("sessions"),
+            root: super::home_dir()
+                .unwrap_or_default()
+                .join(".dsh")
+                .join("sessions"),
         }
     }
 }
@@ -52,10 +55,17 @@ fn parse_header(v: &serde_json::Value) -> Option<DshHeader> {
     }
     Some(DshHeader {
         id: v.get("id")?.as_str()?.to_string(),
-        cwd: v.get("cwd").and_then(|c| c.as_str()).unwrap_or_default().to_string(),
+        cwd: v
+            .get("cwd")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string(),
         created_at: v.get("createdAt").and_then(|t| t.as_i64()).unwrap_or(0),
         subagent: v.get("origin").and_then(|o| o.as_str()) == Some("subagent")
-            || v.get("delegationDepth").and_then(|d| d.as_i64()).unwrap_or(0) > 0,
+            || v.get("delegationDepth")
+                .and_then(|d| d.as_i64())
+                .unwrap_or(0)
+                > 0,
     })
 }
 
@@ -204,7 +214,12 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                 let mut thinking_parts: Vec<&str> = Vec::new();
                 let mut tools: Vec<ToolCallView> = Vec::new();
                 for b in content.as_array().into_iter().flatten() {
-                    let block_text = || b.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+                    let block_text = || {
+                        b.get("text")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                    };
                     match b.get("type").and_then(|v| v.as_str()) {
                         Some("text") => text_parts.extend(block_text()),
                         Some("reasoning") => thinking_parts.extend(block_text()),
@@ -212,7 +227,10 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                             let id = b.get("id").and_then(|v| v.as_str()).unwrap_or_default();
                             let name = b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
                             // arguments 是模型原样输出的 JSON 字符串,解析失败保留原文
-                            let raw = b.get("arguments").and_then(|v| v.as_str()).unwrap_or_default();
+                            let raw = b
+                                .get("arguments")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default();
                             let input = serde_json::from_str::<serde_json::Value>(raw)
                                 .unwrap_or(serde_json::Value::String(raw.to_string()));
                             tools.push(tool_call_view(id.to_string(), name, &input, None, false));
@@ -224,7 +242,10 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                 // 用来挂 usage 的载体(dsh-session surface.d.ts:"exists only to
                 // host usage",如撞上 max-tokens 的调用),提前 continue 会把这次
                 // 调用的 model 与 token 一起丢掉——它落在会话末尾时最明显
-                let model = msg.pointer("/source/model").and_then(|v| v.as_str()).map(String::from);
+                let model = msg
+                    .pointer("/source/model")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 if model.is_some() {
                     p.model = model.clone();
                 }
@@ -232,10 +253,15 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                     // TokenUsage 是"one model call"的账、三项 input 互斥(billed =
                     // 三项之和),所以**按调用累加**,不能 last-wins:一个 turn 多个
                     // step,last-wins 只会剩最后一次调用的量
-                    let sum = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"]
-                        .iter()
-                        .filter_map(|k| u.get(*k).and_then(|v| v.as_i64()))
-                        .sum::<i64>();
+                    let sum = [
+                        "inputTokens",
+                        "outputTokens",
+                        "cacheReadTokens",
+                        "cacheWriteTokens",
+                    ]
+                    .iter()
+                    .filter_map(|k| u.get(*k).and_then(|v| v.as_i64()))
+                    .sum::<i64>();
                     if sum > 0 {
                         p.tokens_used = Some(p.tokens_used.unwrap_or(0) + sum);
                     }
@@ -297,7 +323,8 @@ fn parse_dsh_log(path: &Path) -> Result<DshParse> {
                 };
                 if let Some(&(mi, ti)) = tool_index.get(call_id) {
                     let tc = &mut p.messages[mi].tool_calls[ti];
-                    let text = blocks_text(block.get("content").unwrap_or(&serde_json::Value::Null));
+                    let text =
+                        blocks_text(block.get("content").unwrap_or(&serde_json::Value::Null));
                     if !text.is_empty() {
                         tc.output = Some(clip(&text, MAX_TOOL_IO).0);
                     }
@@ -359,7 +386,11 @@ fn build_meta(r: &SessionFileRef, p: &DshParse) -> SessionMeta {
         file_path: r.file_path.clone(),
         created_at: if created > 0 { created } else { r.mtime_ms },
         updated_at: if p.last_ts > 0 { p.last_ts } else { r.mtime_ms },
-        message_count: p.messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64,
+        message_count: p
+            .messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64,
         size_bytes: r.size,
         git_branch: None,
         model: p.model.clone(),
@@ -417,7 +448,11 @@ impl AgentAdapter for DshAdapter {
         // 压缩配置换挡会新旧后缀并存:陈旧的一份让位(mtime 平局 .zstd 赢,与
         // 写端当前默认一致)。裁决在此单点,list 与 watcher 两条入口共用——
         // 只做在 list 会让 watcher 把陈旧 sibling 的事件当主文件解析
-        let sibling = if name == "session.jsonl" { "session.jsonl.zstd" } else { "session.jsonl" };
+        let sibling = if name == "session.jsonl" {
+            "session.jsonl.zstd"
+        } else {
+            "session.jsonl"
+        };
         if let Ok(sib) = fs::metadata(path.with_file_name(sibling)) {
             let (own_m, sib_m) = (mtime_ms(&meta), mtime_ms(&sib));
             if sib_m > own_m || (sib_m == own_m && name == "session.jsonl") {
@@ -465,7 +500,11 @@ impl AgentAdapter for DshAdapter {
     }
 
     fn with_custom_root(&self, dir: PathBuf) -> Box<dyn AgentAdapter> {
-        let root = if dir.join("sessions").is_dir() { dir.join("sessions") } else { dir };
+        let root = if dir.join("sessions").is_dir() {
+            dir.join("sessions")
+        } else {
+            dir
+        };
         Box::new(Self { root })
     }
 

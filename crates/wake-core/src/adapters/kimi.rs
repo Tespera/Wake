@@ -32,13 +32,17 @@ impl KimiAdapter {
     }
 
     fn cwd_map(&self) -> HashMap<String, String> {
-        let mtime = fs::metadata(&self.index_path).map(|m| mtime_ms(&m)).unwrap_or(0);
+        let mtime = fs::metadata(&self.index_path)
+            .map(|m| mtime_ms(&m))
+            .unwrap_or(0);
         self.cwd_cache
             .get_or_try_build(mtime, || {
                 let mut out = HashMap::new();
                 if let Ok(raw) = fs::read_to_string(&self.index_path) {
                     for line in raw.lines() {
-                        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                        let Ok(v) = serde_json::from_str::<Value>(line) else {
+                            continue;
+                        };
                         if let (Some(id), Some(wd)) = (
                             v.get("sessionId").and_then(|x| x.as_str()),
                             v.get("workDir").and_then(|x| x.as_str()),
@@ -81,7 +85,9 @@ fn read_state(wire_path: &Path) -> KimiState {
         created_ms: 0,
         updated_ms: 0,
     };
-    let Some(session_dir) = session_dir_of(wire_path) else { return s };
+    let Some(session_dir) = session_dir_of(wire_path) else {
+        return s;
+    };
     if let Ok(raw) = fs::read_to_string(session_dir.join("state.json")) {
         if let Ok(v) = serde_json::from_str::<Value>(&raw) {
             if let Some(t) = v.get("title").and_then(|x| x.as_str()) {
@@ -186,7 +192,12 @@ fn parse_kimi_wire(path: &Path) -> Result<(Vec<TranscriptMessage>, u32)> {
     Ok((messages, unknown))
 }
 
-fn build_meta(r: &SessionFileRef, state: &KimiState, cwd: &str, messages: &[TranscriptMessage]) -> SessionMeta {
+fn build_meta(
+    r: &SessionFileRef,
+    state: &KimiState,
+    cwd: &str,
+    messages: &[TranscriptMessage],
+) -> SessionMeta {
     let title = Some(clean_title_candidate(&state.title))
         .filter(|t| !t.is_empty())
         .or_else(|| title_from_messages(messages))
@@ -199,9 +210,20 @@ fn build_meta(r: &SessionFileRef, state: &KimiState, cwd: &str, messages: &[Tran
         project_path: cwd.to_string(),
         project_name: project_name_of(cwd),
         file_path: r.file_path.clone(),
-        created_at: if state.created_ms > 0 { state.created_ms } else { r.mtime_ms },
-        updated_at: if state.updated_ms > 0 { state.updated_ms } else { r.mtime_ms },
-        message_count: messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64,
+        created_at: if state.created_ms > 0 {
+            state.created_ms
+        } else {
+            r.mtime_ms
+        },
+        updated_at: if state.updated_ms > 0 {
+            state.updated_ms
+        } else {
+            r.mtime_ms
+        },
+        message_count: messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64,
         size_bytes: r.size,
         git_branch: None,
         model: None,
@@ -216,7 +238,12 @@ fn build_meta(r: &SessionFileRef, state: &KimiState, cwd: &str, messages: &[Tran
 /// 会话目录名即 native_id(与 session_index.jsonl 的 sessionId 同形,
 /// resume 直接可用)
 fn native_id_of(wire_path: &Path) -> Option<String> {
-    Some(session_dir_of(wire_path)?.file_name()?.to_string_lossy().to_string())
+    Some(
+        session_dir_of(wire_path)?
+            .file_name()?
+            .to_string_lossy()
+            .to_string(),
+    )
 }
 
 impl AgentAdapter for KimiAdapter {
@@ -231,7 +258,9 @@ impl AgentAdapter for KimiAdapter {
         };
         // 主文件判定(session_ 前缀、存在、非空、native_id)统一走 file_ref
         for wd in wds.flatten() {
-            let Ok(sessions) = fs::read_dir(wd.path()) else { continue };
+            let Ok(sessions) = fs::read_dir(wd.path()) else {
+                continue;
+            };
             for sess in sessions.flatten() {
                 let wire = sess.path().join("agents").join("main").join("wire.jsonl");
                 if let Some(r) = self.file_ref(&wire) {

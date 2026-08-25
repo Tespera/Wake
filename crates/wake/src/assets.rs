@@ -56,6 +56,13 @@ brands!(
     "deepseek",
 );
 
+fn lookup_product(path: &str) -> Option<&'static [u8]> {
+    match path {
+        "brands/wake.png" => Some(include_bytes!("../assets/icon-1024.png")),
+        _ => None,
+    }
+}
+
 icons!(
     // gpui-component TitleBar 的 Linux 窗口控制按钮(IconName::Window* 按这
     // 四个路径取图;缺了按钮就渲染成隐形热区——2026-08-24 Codex review)
@@ -89,12 +96,18 @@ icons!(
     "file-text",
     "more-horizontal",
     "hard-drive",
+    "database",
+    "settings",
     "plus",
+    "info",
 );
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(lookup(path).or_else(|| lookup_brand(path)).map(Cow::Borrowed))
+        Ok(lookup(path)
+            .or_else(|| lookup_brand(path))
+            .or_else(|| lookup_product(path))
+            .map(Cow::Borrowed))
     }
 
     fn list(&self, _path: &str) -> Result<Vec<SharedString>> {

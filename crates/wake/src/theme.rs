@@ -3,6 +3,68 @@
 use gpui::{App, Hsla, Rgba, Window};
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppearancePreference {
+    System,
+    Light,
+    Dark,
+}
+
+impl AppearancePreference {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value.trim() {
+            "light" => Self::Light,
+            "dark" => Self::Dark,
+            _ => Self::System,
+        }
+    }
+}
+
+fn appearance_path() -> std::path::PathBuf {
+    let base = dirs::config_dir()
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("wake").join("appearance")
+}
+
+pub fn appearance_preference() -> AppearancePreference {
+    std::fs::read_to_string(appearance_path())
+        .map(|value| AppearancePreference::parse(&value))
+        .unwrap_or(AppearancePreference::System)
+}
+
+fn apply_appearance(preference: AppearancePreference, window: Option<&mut Window>, cx: &mut App) {
+    match preference {
+        AppearancePreference::System => Theme::sync_system_appearance(window, cx),
+        AppearancePreference::Light => Theme::change(ThemeMode::Light, window, cx),
+        AppearancePreference::Dark => Theme::change(ThemeMode::Dark, window, cx),
+    }
+    apply_wake_theme(cx);
+    cx.refresh_windows();
+}
+
+pub fn set_appearance(
+    preference: AppearancePreference,
+    window: Option<&mut Window>,
+    cx: &mut App,
+) -> std::io::Result<()> {
+    let path = appearance_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, preference.as_str())?;
+    apply_appearance(preference, window, cx);
+    Ok(())
+}
+
 /// 带透明度的色值(文字选区等叠加层用)
 fn ca(hex: u32, a: f32) -> Hsla {
     let mut col = c(hex);
@@ -173,17 +235,10 @@ pub fn apply_wake_theme(cx: &mut App) {
 /// 跟随系统外观:同步模式 → 重套 Wake token。
 pub fn sync_appearance(window: Option<&mut Window>, cx: &mut App) {
     // WAKE_THEME=dark|light 可强制模式(调试/截图用)
-    match std::env::var("WAKE_THEME").as_deref() {
-        Ok("dark") => Theme::change(ThemeMode::Dark, window, cx),
-        Ok("light") => Theme::change(ThemeMode::Light, window, cx),
-        _ => Theme::sync_system_appearance(window, cx),
-    }
-    apply_wake_theme(cx);
-}
-
-/// 手动切换(调试/后续设置页用)
-#[allow(dead_code)]
-pub fn set_mode(mode: ThemeMode, window: Option<&mut Window>, cx: &mut App) {
-    Theme::change(mode, window, cx);
-    apply_wake_theme(cx);
+    let preference = match std::env::var("WAKE_THEME").as_deref() {
+        Ok("dark") => AppearancePreference::Dark,
+        Ok("light") => AppearancePreference::Light,
+        _ => appearance_preference(),
+    };
+    apply_appearance(preference, window, cx);
 }

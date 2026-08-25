@@ -130,7 +130,11 @@ fn build_meta(r: &SessionFileRef, side: &Sidecar, messages: &[TranscriptMessage]
         .filter(|t| !t.is_empty())
         .or_else(|| title_from_messages(messages))
         .unwrap_or_else(|| UNTITLED.to_string());
-    let msg_ts_max = messages.iter().filter_map(|m| m.timestamp).max().unwrap_or(0);
+    let msg_ts_max = messages
+        .iter()
+        .filter_map(|m| m.timestamp)
+        .max()
+        .unwrap_or(0);
     SessionMeta {
         key: format!("kiro:{}", r.native_id),
         id: r.native_id.clone(),
@@ -139,12 +143,19 @@ fn build_meta(r: &SessionFileRef, side: &Sidecar, messages: &[TranscriptMessage]
         project_path: side.cwd.clone(),
         project_name: project_name_of(&side.cwd),
         file_path: r.file_path.clone(),
-        created_at: if side.created_ms > 0 { side.created_ms } else { r.mtime_ms },
+        created_at: if side.created_ms > 0 {
+            side.created_ms
+        } else {
+            r.mtime_ms
+        },
         updated_at: match side.updated_ms.max(msg_ts_max) {
             t if t > 0 => t,
             _ => r.mtime_ms,
         },
-        message_count: messages.iter().filter(|m| m.kind == MessageKind::Text).count() as i64,
+        message_count: messages
+            .iter()
+            .filter(|m| m.kind == MessageKind::Text)
+            .count() as i64,
         size_bytes: r.size,
         git_branch: None,
         model: side.model.clone(),

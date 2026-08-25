@@ -1,10 +1,14 @@
 // release 挂 windows 子系统:双击启动不带控制台黑窗。debug 保留控制台,
 // eprintln 的诊断日志还有处落;GUI 子系统下致命错误走 MessageBox
 //(wake-core 的 show_fatal_alert),不依赖 stderr。
-#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 mod assets;
 mod format;
+mod settings;
 mod theme;
 mod ui;
 mod workbench;
@@ -13,7 +17,8 @@ use assets::Assets;
 use gpui::*;
 use gpui_component::Root;
 use workbench::{
-    PaletteDown, PaletteUp, RefreshSessions, ToggleSearch, Workbench, KEY_CONTEXT, PALETTE_CONTEXT,
+    OpenAbout, OpenSettings, PaletteDown, PaletteUp, RefreshSessions, ToggleSearch, Workbench,
+    KEY_CONTEXT, PALETTE_CONTEXT,
 };
 
 actions!(wake_app, [Quit, CloseWindow]);
@@ -35,6 +40,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new(ui::SEARCH_KEYSTROKE, ToggleSearch, Some(KEY_CONTEXT)),
             KeyBinding::new("secondary-r", RefreshSessions, Some(KEY_CONTEXT)),
+            KeyBinding::new("secondary-,", OpenSettings, None),
             KeyBinding::new("secondary-q", Quit, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
             // ⌘K 面板:焦点在搜索输入框,↑↓ 冒泡到面板容器挪选中
@@ -44,7 +50,13 @@ fn main() {
         cx.set_menus(vec![
             Menu {
                 name: "Wake".into(),
-                items: vec![MenuItem::action("Quit Wake", Quit)],
+                items: vec![
+                    MenuItem::action("About Wake", OpenAbout),
+                    MenuItem::separator(),
+                    MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Wake", Quit),
+                ],
             },
             Menu {
                 name: "File".into(),

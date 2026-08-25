@@ -65,7 +65,11 @@ static CLI_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(No
 fn resolve_clis(bins: &[&str]) -> HashMap<String, Option<String>> {
     let mut cache = CLI_CACHE.lock().unwrap();
     let map = cache.get_or_insert_with(HashMap::new);
-    let missing: Vec<&str> = bins.iter().filter(|b| !map.contains_key(**b)).copied().collect();
+    let missing: Vec<&str> = bins
+        .iter()
+        .filter(|b| !map.contains_key(**b))
+        .copied()
+        .collect();
     if !missing.is_empty() {
         let found = probe_clis(&missing);
         for b in missing {
@@ -150,7 +154,10 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
         return ResumeOutcome {
             ok: false,
             command: String::new(),
-            error: Some(format!("Resume isn't supported for {} yet", meta.agent.display_name())),
+            error: Some(format!(
+                "Resume isn't supported for {} yet",
+                meta.agent.display_name()
+            )),
         };
     };
     let bin = session_bin(meta);
@@ -174,7 +181,10 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
         return ResumeOutcome {
             ok: false,
             command,
-            error: Some(format!("Project directory no longer exists: {}. {hint}", meta.project_path)),
+            error: Some(format!(
+                "Project directory no longer exists: {}. {hint}",
+                meta.project_path
+            )),
         };
     }
 

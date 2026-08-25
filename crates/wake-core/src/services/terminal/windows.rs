@@ -369,7 +369,9 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
     };
     // GlobalFree 归 Foundation(windows-sys 的分模块与 MSDN 头文件不同名)
     use windows_sys::Win32::Foundation::GlobalFree;
-    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, HWND_MESSAGE,
     };

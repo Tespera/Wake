@@ -119,8 +119,7 @@ fn run_scan_inner(
             //(2026-08-24 Codex review P1)
             .filter(|r| {
                 !store.is_tombstoned(&r.file_path)
-                    && !store
-                        .is_key_tombstoned(&format!("{}:{}", r.agent.as_str(), r.native_id))
+                    && !store.is_key_tombstoned(&format!("{}:{}", r.agent.as_str(), r.native_id))
             })
             // 无任何根认领的引用(越界枚举或合成测试)保守放行给枚举者;
             // 过滤只裁决"确有更深的根拥有它"的情形
@@ -214,7 +213,9 @@ fn run_scan_inner(
                     Some((mtime, size, _)) => *mtime != r.mtime_ms || *size != r.size,
                 };
             if full || changed {
-                let quick = quick_map.as_ref().and_then(|m| m.get(&r.file_path).cloned());
+                let quick = quick_map
+                    .as_ref()
+                    .and_then(|m| m.get(&r.file_path).cloned());
                 let fallbacks = candidates
                     .get(&(r.agent, r.native_id.clone()))
                     .filter(|v| v.len() > 1)
@@ -268,8 +269,7 @@ fn run_scan_inner(
                 // 全量写入也走事务内副本裁决:扫描快照里的旧副本不得覆盖
                 // watcher 并发间隙写入的更新副本(启动扫描与手动刷新期间
                 // watcher 都活着,2026-08-24 Codex review P1)
-                if let Err(e) = store.write_session_guarded(&meta, item.r.mtime_ms, &parsed.units)
-                {
+                if let Err(e) = store.write_session_guarded(&meta, item.r.mtime_ms, &parsed.units) {
                     eprintln!("[scanner] write failed {}: {e}", item.r.file_path);
                 }
             }

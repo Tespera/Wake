@@ -4,6 +4,8 @@
 //! 颜色只用三级:foreground(主文字)/muted_foreground(辅助)/primary(强调)。
 use gpui::{px, Hsla, Pixels, Styled};
 
+/// 产品展示名（About）——medium
+pub const FONT_DISPLAY: Pixels = px(28.);
 /// 上下文大标题(中栏头部)——semibold
 pub const FONT_TITLE: Pixels = px(22.);
 /// 区块标题(详情页会话标题)——semibold
@@ -51,8 +53,7 @@ pub const REVEAL_IN_FM: &str = if cfg!(target_os = "macos") {
 // ——与 wake-core 各平台 trash_existing 的失败文案也得是同一个词。
 //
 // 全部是 &'static str 而非调用点 format!:确认框内容活在 **dialog builder
-// 闭包**里,面板开着时每帧重跑(见 show_data_sources 处那条注释),留
-// format! 在里面就是每帧堆分配。
+// 闭包**里,对话框开着时每帧重跑,留 format! 在里面就是每帧堆分配。
 macro_rules! trash_copy {
     ($noun:literal, $body:literal) => {
         /// 删除确认框主按钮 / 更多菜单项
@@ -60,8 +61,11 @@ macro_rules! trash_copy {
         /// 删除成功通知
         pub const SESSION_TRASHED: &str = concat!("Session moved to ", $noun);
         /// 删除确认框正文首句(冠词随名词变,故整句单列)
-        pub const TRASH_CONFIRM_BODY: &str =
-            concat!("The session file will be moved to ", $body, ". You can restore it anytime:");
+        pub const TRASH_CONFIRM_BODY: &str = concat!(
+            "The session file will be moved to ",
+            $body,
+            ". You can restore it anytime:"
+        );
     };
 }
 #[cfg(target_os = "windows")]

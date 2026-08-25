@@ -81,7 +81,10 @@ impl TerminalApp {
             TerminalApp::WezTerm => &["start", "--"],
             TerminalApp::XfceTerminal => &["-x"],
             TerminalApp::Kitty => &[],
-            TerminalApp::Konsole | TerminalApp::Ghostty | TerminalApp::Alacritty | TerminalApp::Xterm => &["-e"],
+            TerminalApp::Konsole
+            | TerminalApp::Ghostty
+            | TerminalApp::Alacritty
+            | TerminalApp::Xterm => &["-e"],
         }
     }
 }
@@ -145,7 +148,9 @@ pub(super) fn copy_to_clipboard(text: &str) -> bool {
     } else {
         [xclip, xsel, wl]
     };
-    order.into_iter().any(|(bin, args)| pipe_to(bin, args, text))
+    order
+        .into_iter()
+        .any(|(bin, args)| pipe_to(bin, args, text))
 }
 
 /// 批量删进回收站(freedesktop Trash spec,trash crate 纯库实现,文件
@@ -158,7 +163,11 @@ pub(super) fn trash_existing(paths: &[&str]) -> anyhow::Result<()> {
 /// 已落过 stderr(从 .desktop 启动的场景由 journald 收)
 pub(super) fn alert_dialog(message: &str) {
     let zenity = Command::new("zenity")
-        .args(["--error", "--title=Wake can't start", &format!("--text={message}")])
+        .args([
+            "--error",
+            "--title=Wake can't start",
+            &format!("--text={message}"),
+        ])
         .status();
     if zenity.map(|s| s.success()).unwrap_or(false) {
         return;
@@ -203,6 +212,9 @@ pub(super) fn reveal_path(path: &str) {
     if shown {
         return;
     }
-    let parent = Path::new(path).parent().and_then(|d| d.to_str()).unwrap_or(path);
+    let parent = Path::new(path)
+        .parent()
+        .and_then(|d| d.to_str())
+        .unwrap_or(path);
     open_dir(parent);
 }

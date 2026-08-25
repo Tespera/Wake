@@ -12,7 +12,7 @@ Rust + gpui 0.2 + gpui-component 0.5(用户既定,workspace: crates/wake-core �
 
 ## Users
 
-Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.2.7 2026-08-25,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
+Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。已开源(2026-08-18 v0.1.0 首发,当前 v0.2.9 2026-08-25,github.com/iAmCorey/Wake,MIT):面向同时使用多个 coding agent 的开发者。
 
 ## Product Purpose
 
@@ -34,7 +34,7 @@ Corey 本人(独立开发者,主力工具 Claude Code 与 Codex,中文为主)。
 
 ## Brand Commitments
 
-名称 Wake(2026-08-14 由 Vibex 更名;取「船迹」——agent 驶过的痕迹,兼「唤醒」恢复会话之意)。界面语言英文(2026-08-14 由中文切换,用户反馈中文 UI 词汇观感生硬)。视觉基准(用户 2026-08-14 确认):现代 macOS 原生规范,工艺对标 Things / Bear(优雅轻盈的原生感);外观跟随系统(浅+深双模式)。agent 品牌色作为功能性识别色保留(Claude 橙 #D97757、Codex 绿 #12A06B 等,见 models.rs)。
+名称 Wake(2026-08-14 由 Vibex 更名;取「船迹」——agent 驶过的痕迹,兼「唤醒」恢复会话之意)。界面语言英文(2026-08-14 由中文切换,用户反馈中文 UI 词汇观感生硬)。视觉基准(用户 2026-08-14 确认):现代 macOS 原生规范,工艺对标 Things / Bear(优雅轻盈的原生感);支持跟随系统或固定浅/深外观。agent 品牌色作为功能性识别色保留(Claude 橙 #D97757、Codex 绿 #12A06B 等,见 models.rs)。Session locations 自 0.2.9 起归入独立 Settings 窗口,主界面只保留齿轮入口;Settings 固定为 General / Locations / Data / About,不提供默认 “Open In” 终端选择。
 
 ## Evidence on Hand
 

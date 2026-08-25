@@ -58,8 +58,12 @@ pub fn promote_survivors(
         if !seen.insert(key.as_str()) {
             continue;
         }
-        let Some((agent_str, native_id)) = key.split_once(':') else { continue };
-        let Some(agent) = AgentId::from_str(agent_str) else { continue };
+        let Some((agent_str, native_id)) = key.split_once(':') else {
+            continue;
+        };
+        let Some(agent) = AgentId::from_str(agent_str) else {
+            continue;
+        };
         let mut agent_refs: Vec<SessionFileRef> = Vec::new();
         for a in adapters.iter().filter(|a| a.agent() == agent) {
             if let Ok(refs) = a.list_session_files() {
@@ -135,7 +139,9 @@ pub fn start_watcher(
             };
             let mut batch = vec![first];
             let deadline = std::time::Instant::now() + Duration::from_millis(800);
-            while let Ok(ev) = rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            while let Ok(ev) =
+                rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
                 batch.push(ev);
                 if std::time::Instant::now() >= deadline {
                     break;
