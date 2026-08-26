@@ -3254,7 +3254,7 @@ impl Workbench {
                                         .child(
                                             h_flex()
                                                 .min_w_0()
-                                                .gap(SPACE_XL)
+                                                .gap(SPACE_MD)
                                                 .when_some(
                                                     created_time.clone(),
                                                     |row, (created, tooltip)| {
@@ -3270,6 +3270,18 @@ impl Workbench {
                                                                     )
                                                                     .build(window, cx)
                                                                 }),
+                                                        )
+                                                    },
+                                                )
+                                                .when(
+                                                    created_time.is_some()
+                                                        && updated_time.is_some(),
+                                                    |row| {
+                                                        row.child(
+                                                            div()
+                                                                .flex_shrink_0()
+                                                                .text_color(theme.border)
+                                                                .child("·"),
                                                         )
                                                     },
                                                 )
