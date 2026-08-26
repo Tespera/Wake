@@ -2995,9 +2995,9 @@ impl Workbench {
                             .child(
                                 h_flex()
                                     .absolute()
-                                    // 当前元素属于标题行，负偏移到上一层来源行；来源行右侧
-                                    // 已预留 156px，因此不会遮住 Agent / 项目 / 分支。
-                                    .top(-px(27.))
+                                    // 当前元素属于标题行，回移到上一层来源行。先按几何
+                                    // 中心线对齐，再向上补 3px，抵消按钮描边带来的视觉下沉。
+                                    .top(-px(36.5))
                                     .right(SPACE_XXL)
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
