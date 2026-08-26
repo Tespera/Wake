@@ -4,11 +4,7 @@
 
 ## [0.2.11] — 2026-08-26
 
-- Update: refreshed the three-pane interface with narrower navigation columns, aligned 44px window rows, balanced 88px identity regions, and a quieter icon-only session sort control
-- Update: reorganized session details into a clearer title and metadata hierarchy for model, source, message and token counts, project path, and created/updated time
-- Update: session list, search results, and detail metadata now share smart timestamps — Just now, minutes ago, local time, Yesterday, or a calendar date — with exact local time on hover
-- Update: the conversation reader now uses a distinct reading surface, while Settings spacing, disabled-location contrast, and the Not detected alignment follow the same visual rhythm
-- Update: manual session refresh now runs non-modally with progress in the sidebar, so browsing, searching, and reading remain available during a scan
+- Update: refreshed the UI
 
 ## [0.2.10] — 2026-08-26
 
