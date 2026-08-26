@@ -45,9 +45,7 @@ use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
-use crate::format::{
-    abs_date, date_only, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path,
-};
+use crate::format::{abs_date, expand_tilde, fmt_tokens, one_line, smart_time, tilde_path};
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
 use crate::update::{self, UpdateStatus};
@@ -138,6 +136,8 @@ impl ListDelegate for SessionsDelegate {
     ) -> Option<Self::Item> {
         let s = self.sessions.get(ix.row)?;
         let theme = cx.theme();
+        let updated_time: SharedString = smart_time(s.updated_at).into();
+        let updated_tooltip: SharedString = abs_date(s.updated_at).into();
 
         Some(
             ListItem::new(ix.row)
@@ -193,7 +193,18 @@ impl ListDelegate for SessionsDelegate {
                                     theme.muted_foreground,
                                 ))
                                 .child(div().flex_1())
-                                .child(div().flex_shrink_0().child(relative_time(s.updated_at))),
+                                .child(
+                                    div()
+                                        .id(("session-updated-time", ix.row))
+                                        .flex_shrink_0()
+                                        .child(updated_time)
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(
+                                                updated_tooltip.clone(),
+                                            )
+                                            .build(window, cx)
+                                        }),
+                                ),
                         ),
                 ),
         )
@@ -233,6 +244,9 @@ impl ListDelegate for SearchDelegate {
     ) -> Option<Self::Item> {
         let h = self.hits.get(ix.row)?;
         let theme = cx.theme();
+        let timestamp = h.timestamp.unwrap_or(0);
+        let hit_time: SharedString = smart_time(timestamp).into();
+        let hit_time_tooltip: SharedString = abs_date(timestamp).into();
         let snippet = h
             .snippet
             .replace(HL_OPEN, "「")
@@ -267,14 +281,17 @@ impl ListDelegate for SearchDelegate {
                             .child(div().flex_1())
                             .child(
                                 div()
+                                    .id(("search-hit-time", ix.row))
                                     .flex_shrink_0()
                                     .text_size(FONT_CAPTION)
                                     .text_color(theme.muted_foreground)
-                                    .child(format!(
-                                        "{} · {}",
-                                        h.session.project_name,
-                                        relative_time(h.timestamp.unwrap_or(0))
-                                    )),
+                                    .child(format!("{} · {}", h.session.project_name, hit_time))
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            hit_time_tooltip.clone(),
+                                        )
+                                        .build(window, cx)
+                                    }),
                             ),
                     )
                     .child(
@@ -2951,13 +2968,13 @@ impl Workbench {
         let detail_fact_line: SharedString = detail_facts.join(" · ").into();
         let created_time: Option<(SharedString, SharedString)> = (meta.created_at > 0).then(|| {
             (
-                format!("Created {}", date_only(meta.created_at)).into(),
+                format!("Created {}", smart_time(meta.created_at)).into(),
                 format!("Created {}", abs_date(meta.created_at)).into(),
             )
         });
         let updated_time: Option<(SharedString, SharedString)> = (meta.updated_at > 0).then(|| {
             (
-                format!("Updated {}", date_only(meta.updated_at)).into(),
+                format!("Updated {}", smart_time(meta.updated_at)).into(),
                 format!("Updated {}", abs_date(meta.updated_at)).into(),
             )
         });

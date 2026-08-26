@@ -1,26 +1,32 @@
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, TimeZone};
 
-pub fn relative_time(ts: i64) -> String {
+/// 会话时间的渐进式展示：越近越强调新鲜度，越远越强调日期锚点。
+pub fn smart_time(ts: i64) -> String {
+    smart_time_from(ts, &Local::now())
+}
+
+fn smart_time_from(ts: i64, now: &DateTime<Local>) -> String {
     if ts <= 0 {
         return String::new();
     }
-    let now = chrono::Utc::now().timestamp_millis();
-    let diff = now - ts;
+
+    let Some(dt) = Local.timestamp_millis_opt(ts).single() else {
+        return String::new();
+    };
+    let diff = now.timestamp_millis() - ts;
     const MIN: i64 = 60_000;
-    if diff < MIN {
-        "now".to_string()
-    } else if diff < 60 * MIN {
-        format!("{}m", diff / MIN)
-    } else if diff < 24 * 60 * MIN {
-        format!("{}h", diff / (60 * MIN))
-    } else if diff < 7 * 24 * 60 * MIN {
-        format!("{}d", diff / (24 * 60 * MIN))
+    if (0..MIN).contains(&diff) {
+        "Just now".to_string()
+    } else if (MIN..60 * MIN).contains(&diff) {
+        format!("{} min ago", diff / MIN)
+    } else if dt.date_naive() == now.date_naive() {
+        dt.format("%-I:%M %p").to_string()
+    } else if dt.date_naive() == now.date_naive() - Duration::days(1) {
+        "Yesterday".to_string()
+    } else if dt.year() == now.year() {
+        dt.format("%b %-d").to_string()
     } else {
-        Local
-            .timestamp_millis_opt(ts)
-            .single()
-            .map(|d| d.format("%m-%d").to_string())
-            .unwrap_or_default()
+        dt.format("%b %-d, %Y").to_string()
     }
 }
 
@@ -33,18 +39,6 @@ pub fn abs_date(ts: i64) -> String {
         .timestamp_millis_opt(ts)
         .single()
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_default()
-}
-
-/// 详情页常显日期：精确时间放进 Hover，降低头部的信息密度。
-pub fn date_only(ts: i64) -> String {
-    if ts <= 0 {
-        return String::new();
-    }
-    Local
-        .timestamp_millis_opt(ts)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_default()
 }
 
@@ -116,5 +110,47 @@ pub fn one_line(s: &str, max_chars: usize) -> String {
         t
     } else {
         joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local_time(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .expect("test date should be unambiguous in the local timezone")
+    }
+
+    #[test]
+    fn smart_time_uses_progressive_precision() {
+        let now = local_time(2026, 8, 26, 18, 0);
+
+        assert_eq!(
+            smart_time_from((now - Duration::seconds(30)).timestamp_millis(), &now),
+            "Just now"
+        );
+        assert_eq!(
+            smart_time_from((now - Duration::minutes(23)).timestamp_millis(), &now),
+            "23 min ago"
+        );
+        assert_eq!(
+            smart_time_from(local_time(2026, 8, 26, 15, 42).timestamp_millis(), &now),
+            "3:42 PM"
+        );
+        assert_eq!(
+            smart_time_from(local_time(2026, 8, 25, 12, 0).timestamp_millis(), &now),
+            "Yesterday"
+        );
+        assert_eq!(
+            smart_time_from(local_time(2026, 8, 21, 12, 0).timestamp_millis(), &now),
+            "Aug 21"
+        );
+        assert_eq!(
+            smart_time_from(local_time(2025, 8, 21, 12, 0).timestamp_millis(), &now),
+            "Aug 21, 2025"
+        );
     }
 }
