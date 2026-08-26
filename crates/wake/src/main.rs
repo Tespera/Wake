@@ -83,8 +83,8 @@ fn main() {
             TitlebarOptions {
                 title: None,
                 appears_transparent: true,
-                // 40px Wake 顶部净空中垂直居中 13.5px traffic lights。
-                traffic_light_position: Some(point(px(20.), px(13.))),
+                // 44px Wake 顶部净空中垂直居中 13.5px traffic lights。
+                traffic_light_position: Some(point(px(20.), px(15.))),
             }
         } else {
             TitlebarOptions {

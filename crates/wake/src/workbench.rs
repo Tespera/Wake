@@ -70,8 +70,10 @@ pub const PALETTE_CONTEXT: &str = "WakePalette";
 const PALETTE_HEIGHT: Pixels = px(492.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
 const FORM_LABEL_W: Pixels = px(52.);
-/// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留约 6px。
-const WINDOW_TITLEBAR_HEIGHT: Pixels = px(40.);
+/// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留 8px。
+const WINDOW_TITLEBAR_HEIGHT: Pixels = px(44.);
+/// 侧栏底部常态工具栏内容高；加上父容器 1px 顶部分隔线，总高 44px。
+const SIDEBAR_FOOTER_ROW_HEIGHT: Pixels = px(43.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -2261,7 +2263,7 @@ impl Workbench {
             .flex_shrink_0()
             .bg(theme.sidebar)
             // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token；主窗口
-            // 使用 40px 高度，与详情顶部行共享同一垂直节奏。
+            // 使用 44px 高度，与详情顶部行共享同一垂直节奏。
             .when(show_titlebar, |this| {
                 this.child(TitleBar::new().h(WINDOW_TITLEBAR_HEIGHT))
             })
@@ -2460,8 +2462,8 @@ impl Workbench {
                     })
                     .child(
                         h_flex()
+                            .h(SIDEBAR_FOOTER_ROW_HEIGHT)
                             .px(SIDEBAR_EDGE)
-                            .py(SPACE_SM)
                             .items_center()
                             .justify_end()
                             .gap(SPACE_XS)
