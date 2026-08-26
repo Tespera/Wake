@@ -70,6 +70,9 @@ pub const PALETTE_CONTEXT: &str = "WakePalette";
 const PALETTE_HEIGHT: Pixels = px(492.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
 const FORM_LABEL_W: Pixels = px(52.);
+/// gpui-component TitleBar 的固定高度。中栏与详情栏用同一高度延续窗口 chrome；
+/// 依赖升级若修改 TitleBar::TITLE_BAR_HEIGHT，需同步此值。
+const WINDOW_CHROME_HEIGHT: Pixels = px(34.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -2258,24 +2261,39 @@ impl Workbench {
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
-            // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token,不再叠加覆写
-            .when(show_titlebar, |this| this.child(TitleBar::new()))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .px(SIDEBAR_EDGE)
-                    .pt(SPACE_SM)
-                    .pb(SPACE_MD)
-                    .child(
-                        div()
-                            .pl(TITLE_INSET)
-                            .pr(SIDEBAR_EDGE)
-                            .text_size(FONT_HEADING)
-                            .font_semibold()
-                            .text_color(theme.foreground)
-                            .child("Wake"),
-                    ),
-            )
+            // 三栏共用 34px 顶部 chrome。macOS / CSD 直接把品牌放进真实
+            // TitleBar；有系统标题栏的平台补同高栏，保证内容区仍是同一骨架。
+            .when(show_titlebar, |this| {
+                this.child(
+                    TitleBar::new()
+                        .bg(theme.title_bar)
+                        .border_color(theme.border)
+                        .child(
+                            div()
+                                .pl(SPACE_SM)
+                                .text_size(FONT_BODY)
+                                .font_semibold()
+                                .text_color(theme.foreground)
+                                .child("Wake"),
+                        ),
+                )
+            })
+            .when(!show_titlebar, |this| {
+                this.child(
+                    h_flex()
+                        .h(WINDOW_CHROME_HEIGHT)
+                        .flex_shrink_0()
+                        .px(SPACE_LG)
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar)
+                        .text_size(FONT_BODY)
+                        .font_semibold()
+                        .text_color(theme.foreground)
+                        .child("Wake"),
+                )
+            })
             .child(
                 div().flex_shrink_0().px(SIDEBAR_EDGE).pb(SPACE_MD).child(
                     h_flex().gap(SPACE_SM).child(
@@ -2566,36 +2584,41 @@ impl Workbench {
             .flex_shrink_0()
             .bg(theme.list)
             .child(
-                v_flex()
+                h_flex()
                     .id("list-header")
                     .w_full()
+                    .h(WINDOW_CHROME_HEIGHT)
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_LG)
-                    .pt(SPACE_XL)
-                    .pb(SPACE_MD)
+                    .items_center()
+                    .justify_between()
+                    .gap(SPACE_MD)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .bg(theme.title_bar)
                     .child(
                         h_flex()
-                            .items_start()
-                            .justify_between()
+                            .min_w_0()
+                            .items_center()
+                            .gap(SPACE_SM)
                             .child(
-                                v_flex()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .text_size(FONT_TITLE)
-                                            .font_semibold()
-                                            .child(self.context_title()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(FONT_LABEL)
-                                            .text_color(theme.muted_foreground)
-                                            .child(shown_label),
-                                    ),
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(FONT_BODY)
+                                    .font_semibold()
+                                    .child(self.context_title()),
                             )
-                            .child(div().pt(px(2.)).child(sort_menu)),
-                    ),
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(FONT_LABEL)
+                                    .text_color(theme.muted_foreground)
+                                    .child(shown_label),
+                            ),
+                    )
+                    .child(div().flex_shrink_0().child(sort_menu)),
             )
             .child(if shown == 0 {
                 if library_empty && self.scan.scanning {
@@ -2838,27 +2861,37 @@ impl Workbench {
             return v_flex()
                 .flex_1()
                 .h_full()
-                .items_center()
-                .justify_center()
                 .bg(theme.background)
                 .child(
-                    div()
-                        .w(px(360.))
-                        .px(SPACE_XXL)
-                        .py(SPACE_XXL)
-                        .rounded(theme.radius_lg)
-                        .bg(theme.popover)
-                        .child(empty_state(
-                            "icons/message-square.svg",
-                            px(58.),
-                            px(26.),
-                            "No session selected",
-                            format!(
-                                "Pick one from the list, or press {} to search.",
-                                search_key_hint()
-                            ),
-                            cx,
-                        )),
+                    h_flex()
+                        .w_full()
+                        .h(WINDOW_CHROME_HEIGHT)
+                        .flex_shrink_0()
+                        .window_control_area(WindowControlArea::Drag)
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .bg(theme.title_bar),
+                )
+                .child(
+                    v_flex().flex_1().items_center().justify_center().child(
+                        div()
+                            .w(px(360.))
+                            .px(SPACE_XXL)
+                            .py(SPACE_XXL)
+                            .rounded(theme.radius_lg)
+                            .bg(theme.popover)
+                            .child(empty_state(
+                                "icons/message-square.svg",
+                                px(58.),
+                                px(26.),
+                                "No session selected",
+                                format!(
+                                    "Pick one from the list, or press {} to search.",
+                                    search_key_hint()
+                                ),
+                                cx,
+                            )),
+                    ),
                 )
                 .into_any_element();
         };
@@ -2944,225 +2977,233 @@ impl Workbench {
             .h_full()
             .bg(theme.background)
             .child(
-                v_flex()
-                    .id("detail-header")
+                h_flex()
+                    .id("detail-chrome")
+                    .w_full()
+                    .h(WINDOW_CHROME_HEIGHT)
                     .flex_shrink_0()
-                    .relative()
                     .window_control_area(WindowControlArea::Drag)
-                    .px(SPACE_XXL)
-                    .pt(SPACE_XL)
-                    .pb(SPACE_XL)
+                    .px(SPACE_LG)
+                    .items_center()
+                    .justify_between()
                     .gap(SPACE_MD)
                     .border_b_1()
                     .border_color(theme.border)
+                    .bg(theme.title_bar)
                     .child(
                         h_flex()
+                            .flex_1()
                             .min_w_0()
-                            .pr(px(156.))
                             .gap(SPACE_SM)
                             .items_center()
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
-                            .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
+                            .child(
+                                img(meta.agent.brand_icon(theme.mode.is_dark()))
+                                    .size(px(15.))
+                                    .flex_shrink_0(),
+                            )
                             .child(div().flex_shrink_0().child(meta.agent.display_name()))
-                            .child(badge(meta.project_name.clone(), theme.muted, theme.muted_foreground))
+                            .child(badge(
+                                meta.project_name.clone(),
+                                theme.muted,
+                                theme.muted_foreground,
+                            ))
                             .when_some(meta.git_branch.clone(), |this, branch| {
                                 this.child(
                                     h_flex()
                                         .min_w_0()
                                         .gap(SPACE_XS)
-                                        .child(icon("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0())
+                                        .child(
+                                            icon("icons/git-branch.svg")
+                                                .with_size(px(11.))
+                                                .flex_shrink_0(),
+                                        )
                                         .child(div().min_w_0().truncate().child(branch)),
                                 )
                             }),
                     )
                     .child(
                         h_flex()
-                            .items_start()
-                            .justify_between()
-                            .gap(SPACE_LG)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .max_h(px(54.))
-                                    .overflow_hidden()
-                                    .text_size(FONT_TITLE)
-                                    .line_height(relative(1.15))
-                                    .font_semibold()
-                                    .child(meta.title.clone()),
-                            )
-                            .child(
+                            .flex_shrink_0()
+                            .gap(SPACE_XS)
+                            .child({
+                                // Open In split 按钮(Codex/kooky 风):左段 = 上次
+                                // 目标的应用图标,点击直开;右段 chevron 展开列表。
+                                // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
+                                // 偏好目标不在列表时(如 dsh 会话 + 偏好 Kooky)回退首项
+                                let terms = terminal::terminals_for(meta.agent);
+                                let current = self
+                                    .preferred_terminal
+                                    .filter(|t| terms.contains(t))
+                                    .or_else(|| terms.first().copied());
+                                // 偏好已存在时 current 要么就是它、要么是回退值,
+                                // 两种情况点左段都不该改写偏好(见 do_resume)
+                                let remember_current = self.preferred_terminal.is_none();
+                                let current_icon =
+                                    current.and_then(|t| self.terminal_icons.get(t.id()).cloned());
+                                let term_items: Vec<(terminal::TerminalApp, Option<PathBuf>)> =
+                                    terms
+                                        .iter()
+                                        .map(|t| (*t, self.terminal_icons.get(t.id()).cloned()))
+                                        .collect();
+                                let menu_entity = cx.entity();
+                                // 无常显分隔线,hover 分段高亮暗示两段(Codex 同款);
+                                // 右段 Button 用 custom variant 与左段 hover 完全一致
                                 h_flex()
-                                    .absolute()
-                                    // 当前元素属于标题行，回移到上一层来源行。先按几何
-                                    // 中心线对齐，再向上补 3px，抵消按钮描边带来的视觉下沉。
-                                    .top(-px(36.5))
-                                    .right(SPACE_XXL)
-                                    .flex_shrink_0()
-                                    .gap(SPACE_XS)
-                                    .child({
-                                        // Open In split 按钮(Codex/kooky 风):左段 = 上次
-                                        // 目标的应用图标,点击直开;右段 chevron 展开列表。
-                                        // 目标列表按 agent 过滤(Kooky 深链不认 dsh);
-                                        // 偏好目标不在列表时(如 dsh 会话 + 偏好 Kooky)回退首项
-                                        let terms = terminal::terminals_for(meta.agent);
-                                        let current = self
-                                            .preferred_terminal
-                                            .filter(|t| terms.contains(t))
-                                            .or_else(|| terms.first().copied());
-                                        // 偏好已存在时 current 要么就是它、要么是回退值,
-                                        // 两种情况点左段都不该改写偏好(见 do_resume)
-                                        let remember_current = self.preferred_terminal.is_none();
-                                        let current_icon = current
-                                            .and_then(|t| self.terminal_icons.get(t.id()).cloned());
-                                        let term_items: Vec<(terminal::TerminalApp, Option<PathBuf>)> =
-                                            terms
-                                                .iter()
-                                                .map(|t| {
-                                                    (*t, self.terminal_icons.get(t.id()).cloned())
-                                                })
-                                                .collect();
-                                        let menu_entity = cx.entity();
-                                        // 无常显分隔线,hover 分段高亮暗示两段(Codex 同款);
-                                        // 右段 Button 用 custom variant 与左段 hover 完全一致
-                                        h_flex()
-                                            .h(px(28.))
-                                            .rounded(RADIUS_BUTTON)
-                                            .border_1()
-                                            .border_color(theme.border)
-                                            .bg(theme.secondary)
-                                            .overflow_hidden()
-                                            .child(
-                                                div()
-                                                    .id("open-in-main")
-                                                    .h_full()
-                                                    .px(px(7.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .cursor_pointer()
-                                                    .hover(|s| s.bg(theme.secondary_hover))
-                                                    .active(|s| s.bg(theme.secondary_active))
-                                                    .child(match &current_icon {
-                                                        Some(p) => img(p.clone())
-                                                            .size(px(14.))
-                                                            .into_any_element(),
-                                                        None => icon("icons/terminal.svg")
-                                                            .with_size(px(13.))
-                                                            .text_color(theme.secondary_foreground)
-                                                            .into_any_element(),
-                                                    })
-                                                    .tooltip({
-                                                        let label: SharedString = match current {
-                                                            Some(t) => format!("Open this session in {}", t.display_name()).into(),
-                                                            None => "Open this session".into(),
-                                                        };
-                                                        move |window, cx| {
-                                                            gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
-                                                        }
-                                                    })
-                                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                                        if let Some(term) = current {
-                                                            this.do_resume(term, remember_current, window, cx);
-                                                        } else {
-                                                            // 空列表在 macOS 不可能(Terminal.app 恒在),
-                                                            // Windows/Linux 上 PATH 被启动器改写时会发生
-                                                            // ——静默无操作是死按钮,至少说一声为什么
-                                                            window.push_notification(
-                                                                Notification::warning(
-                                                                    "No terminal application found on PATH",
-                                                                ),
-                                                                cx,
-                                                            );
-                                                        }
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(1.))
-                                                    .h_full()
-                                                    .flex_shrink_0()
-                                                    .bg(theme.border),
-                                            )
-                                            .child(
-                                                Button::new("open-in-more")
-                                                    .custom(
-                                                        ButtonCustomVariant::new(cx)
-                                                            .foreground(theme.muted_foreground)
-                                                            .hover(theme.secondary_hover)
-                                                            .active(theme.secondary_active),
+                                    .h(px(28.))
+                                    .rounded(RADIUS_BUTTON)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.secondary)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id("open-in-main")
+                                            .h_full()
+                                            .px(px(7.))
+                                            .flex()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme.secondary_hover))
+                                            .active(|s| s.bg(theme.secondary_active))
+                                            .child(match &current_icon {
+                                                Some(p) => {
+                                                    img(p.clone()).size(px(14.)).into_any_element()
+                                                }
+                                                None => icon("icons/terminal.svg")
+                                                    .with_size(px(13.))
+                                                    .text_color(theme.secondary_foreground)
+                                                    .into_any_element(),
+                                            })
+                                            .tooltip({
+                                                let label: SharedString = match current {
+                                                    Some(t) => format!(
+                                                        "Open this session in {}",
+                                                        t.display_name()
                                                     )
-                                                    .rounded(px(0.))
-                                                    .h(px(26.))
-                                                    .w(px(22.))
-                                                    .icon(
-                                                        icon("icons/chevron-down.svg")
-                                                            .with_size(px(12.)),
+                                                    .into(),
+                                                    None => "Open this session".into(),
+                                                };
+                                                move |window, cx| {
+                                                    gpui_component::tooltip::Tooltip::new(
+                                                        label.clone(),
                                                     )
-                                                    .tooltip("Open this session in…")
-                                                    .dropdown_menu(move |menu, _, _| {
-                                                        let mut menu = menu.min_w(px(170.));
-                                                        for (term, icon_path) in term_items.clone() {
-                                                            let entity = menu_entity.clone();
-                                                            menu = menu.item(
-                                                                PopupMenuItem::element(move |_, _| {
-                                                                    h_flex()
-                                                                        .gap(SPACE_SM)
-                                                                        .items_center()
-                                                                        .child(match &icon_path {
-                                                                            Some(p) => img(p.clone())
-                                                                                .size(px(16.))
-                                                                                .into_any_element(),
-                                                                            None => icon("icons/terminal.svg")
-                                                                                .with_size(px(15.))
-                                                                                .into_any_element(),
-                                                                        })
-                                                                        .child(term.display_name())
+                                                    .build(window, cx)
+                                                }
+                                            })
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if let Some(term) = current {
+                                                    this.do_resume(
+                                                        term,
+                                                        remember_current,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    // 空列表在 macOS 不可能(Terminal.app 恒在),
+                                                    // Windows/Linux 上 PATH 被启动器改写时会发生
+                                                    // ——静默无操作是死按钮,至少说一声为什么
+                                                    window.push_notification(
+                                                        Notification::warning(
+                                                            "No terminal application found on PATH",
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    )
+                                    .child(
+                                        div().w(px(1.)).h_full().flex_shrink_0().bg(theme.border),
+                                    )
+                                    .child(
+                                        Button::new("open-in-more")
+                                            .custom(
+                                                ButtonCustomVariant::new(cx)
+                                                    .foreground(theme.muted_foreground)
+                                                    .hover(theme.secondary_hover)
+                                                    .active(theme.secondary_active),
+                                            )
+                                            .rounded(px(0.))
+                                            .h(px(26.))
+                                            .w(px(22.))
+                                            .icon(icon("icons/chevron-down.svg").with_size(px(12.)))
+                                            .tooltip("Open this session in…")
+                                            .dropdown_menu(move |menu, _, _| {
+                                                let mut menu = menu.min_w(px(170.));
+                                                for (term, icon_path) in term_items.clone() {
+                                                    let entity = menu_entity.clone();
+                                                    menu = menu.item(
+                                                        PopupMenuItem::element(move |_, _| {
+                                                            h_flex()
+                                                                .gap(SPACE_SM)
+                                                                .items_center()
+                                                                .child(match &icon_path {
+                                                                    Some(p) => img(p.clone())
+                                                                        .size(px(16.))
+                                                                        .into_any_element(),
+                                                                    None => {
+                                                                        icon("icons/terminal.svg")
+                                                                            .with_size(px(15.))
+                                                                            .into_any_element()
+                                                                    }
                                                                 })
-                                                                .on_click(move |_, window, cx| {
-                                                                    entity.update(cx, |this, cx| {
-                                                                        this.do_resume(term, true, window, cx);
-                                                                    });
-                                                                }),
-                                                            );
-                                                        }
-                                                        menu
-                                                    })
-                                                    .anchor(Corner::TopRight),
-                                            )
-                                    })
-                                    .child(tool_btn(
-                                        "fav",
-                                        "icons/star.svg",
-                                        "icons/star-filled.svg",
-                                        rgb(crate::theme::STAR_YELLOW).into(),
-                                        if meta.favorite {
-                                            "Unstar"
-                                        } else {
-                                            "Star"
-                                        },
-                                        meta.favorite,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.toggle_favorite(window, cx)
-                                        }),
-                                    ))
-                                    .child(tool_btn(
-                                        "pin",
-                                        "icons/pin.svg",
-                                        "icons/pin-filled.svg",
-                                        theme.primary,
-                                        if meta.pinned {
-                                            "Unpin"
-                                        } else {
-                                            "Pin"
-                                        },
-                                        meta.pinned,
-                                        cx.listener(|this, _, window, cx| {
-                                            this.toggle_pinned(window, cx)
-                                        }),
-                                    ))
-                                    .child(more_menu),
-                            ),
+                                                                .child(term.display_name())
+                                                        })
+                                                        .on_click(move |_, window, cx| {
+                                                            entity.update(cx, |this, cx| {
+                                                                this.do_resume(
+                                                                    term, true, window, cx,
+                                                                );
+                                                            });
+                                                        }),
+                                                    );
+                                                }
+                                                menu
+                                            })
+                                            .anchor(Corner::TopRight),
+                                    )
+                            })
+                            .child(tool_btn(
+                                "fav",
+                                "icons/star.svg",
+                                "icons/star-filled.svg",
+                                rgb(crate::theme::STAR_YELLOW).into(),
+                                if meta.favorite { "Unstar" } else { "Star" },
+                                meta.favorite,
+                                cx.listener(|this, _, window, cx| this.toggle_favorite(window, cx)),
+                            ))
+                            .child(tool_btn(
+                                "pin",
+                                "icons/pin.svg",
+                                "icons/pin-filled.svg",
+                                theme.primary,
+                                if meta.pinned { "Unpin" } else { "Pin" },
+                                meta.pinned,
+                                cx.listener(|this, _, window, cx| this.toggle_pinned(window, cx)),
+                            ))
+                            .child(more_menu),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("detail-header")
+                    .flex_shrink_0()
+                    .px(SPACE_XXL)
+                    .pt(SPACE_LG)
+                    .pb(SPACE_XL)
+                    .gap(SPACE_MD)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_h(px(54.))
+                            .overflow_hidden()
+                            .text_size(FONT_TITLE)
+                            .line_height(relative(1.15))
+                            .font_semibold()
+                            .child(meta.title.clone()),
                     )
                     .child(
                         v_flex()
@@ -3176,9 +3217,7 @@ impl Workbench {
                                     .min_w_0()
                                     .gap(px(6.))
                                     .child(
-                                        icon("icons/folder.svg")
-                                            .with_size(px(12.))
-                                            .flex_shrink_0(),
+                                        icon("icons/folder.svg").with_size(px(12.)).flex_shrink_0(),
                                     )
                                     .child(div().min_w_0().truncate().child(detail_path)),
                             )
@@ -3204,12 +3243,7 @@ impl Workbench {
                                             this.child(outline_badge(source, color))
                                         },
                                     )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(detail_fact_line),
-                                    ),
+                                    .child(div().min_w_0().truncate().child(detail_fact_line)),
                             )
                             .when(created_time.is_some() || updated_time.is_some(), |this| {
                                 this.child(

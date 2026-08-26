@@ -124,10 +124,6 @@ pub const SUB_INDENT: Pixels = px(12.);
 /// 12.125 实测落位 −0.125;调到 12.25 反而变成 +0.375——2x 屏光栅化步长是
 /// 0.5px,两者落进不同物理像素,别再往小数点后调了。
 pub const GROUP_HEAD_INSET: Pixels = px(12.125);
-/// 侧栏标题 "Wake" 的左内边距:同样让首字母 W 的字形中心落在轴上。
-/// 实测 16px semibold 的 W 宽 14.25、左承距 0.5,文字左缘需 19.65;
-/// 减去容器的 SIDEBAR_EDGE 得 9.15,取 9.0(2x 屏下 0.5px 以下的差会被光栅化吃掉)。
-pub const TITLE_INSET: Pixels = px(9.);
 /// 侧栏主导航行高(固定区:All Sessions/Starred;搜索框同高)
 pub const ROW_HEIGHT: Pixels = px(32.);
 /// 侧栏子级行高(分组展开项:agent/项目)——比主导航低一级,
