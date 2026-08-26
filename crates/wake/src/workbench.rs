@@ -2501,17 +2501,6 @@ impl Workbench {
         let theme = cx.theme();
         let shown = self.list_state.read(cx).delegate().sessions.len();
         let library_empty = self.agent_counts.iter().map(|(_, n)| *n).sum::<i64>() == 0;
-        let listed_count = self.total_sessions.max(0);
-        let shown_label: SharedString = format!(
-            "{} {}",
-            listed_count,
-            if listed_count == 1 {
-                "session"
-            } else {
-                "sessions"
-            }
-        )
-        .into();
         let sort_key = self.sort_key;
         let sort_ascending = self.sort_ascending;
         let sort_entity = cx.entity();
@@ -2573,36 +2562,28 @@ impl Workbench {
             .flex_shrink_0()
             .bg(theme.list)
             .child(
-                v_flex()
+                h_flex()
                     .id("list-header")
                     .w_full()
+                    .h(WINDOW_TITLEBAR_HEIGHT)
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
-                    .child(
-                        h_flex()
-                            .h(WINDOW_TITLEBAR_HEIGHT)
-                            .px(SPACE_LG)
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(FONT_TITLE)
-                                    .font_semibold()
-                                    .child(self.context_title()),
-                            )
-                            .child(div().flex_shrink_0().child(sort_menu)),
-                    )
+                    .px(SPACE_LG)
+                    .items_center()
+                    .justify_between()
+                    .gap(SPACE_SM)
                     .child(
                         div()
-                            .px(SPACE_LG)
-                            .pb(SPACE_MD)
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(shown_label),
-                    ),
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(FONT_HEADING)
+                            .font_semibold()
+                            .child(self.context_title()),
+                    )
+                    .child(div().flex_shrink_0().child(sort_menu)),
             )
+            .child(div().h(SPACE_SM).flex_shrink_0())
             .child(if shown == 0 {
                 if library_empty && self.scan.scanning {
                     v_flex()
