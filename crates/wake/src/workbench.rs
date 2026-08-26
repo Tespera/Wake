@@ -70,6 +70,8 @@ pub const PALETTE_CONTEXT: &str = "WakePalette";
 const PALETTE_HEIGHT: Pixels = px(492.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
 const FORM_LABEL_W: Pixels = px(52.);
+/// macOS 透明窗口标题栏与 gpui-component TitleBar 的固定高度。
+const WINDOW_TITLEBAR_HEIGHT: Pixels = px(34.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -2947,58 +2949,42 @@ impl Workbench {
                 v_flex()
                     .id("detail-header")
                     .flex_shrink_0()
-                    .relative()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_XXL)
-                    .pt(SPACE_XL)
                     .pb(SPACE_XL)
                     .gap(SPACE_MD)
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
                         h_flex()
-                            .min_w_0()
-                            .pr(px(156.))
-                            .gap(SPACE_SM)
+                            .w_full()
+                            .h(WINDOW_TITLEBAR_HEIGHT)
                             .items_center()
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
-                            .child(div().flex_shrink_0().child(meta.agent.display_name()))
-                            .child(badge(meta.project_name.clone(), theme.muted, theme.muted_foreground))
-                            .when_some(meta.git_branch.clone(), |this, branch| {
-                                this.child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .gap(SPACE_XS)
-                                        .child(icon("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0())
-                                        .child(div().min_w_0().truncate().child(branch)),
-                                )
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .items_start()
                             .justify_between()
-                            .gap(SPACE_LG)
+                            .gap(SPACE_MD)
                             .child(
-                                div()
+                                h_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .max_h(px(54.))
-                                    .overflow_hidden()
-                                    .text_size(FONT_TITLE)
-                                    .line_height(relative(1.15))
-                                    .font_semibold()
-                                    .child(meta.title.clone()),
+                                    .gap(SPACE_SM)
+                                    .items_center()
+                                    .text_size(FONT_LABEL)
+                                    .text_color(theme.muted_foreground)
+                                    .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
+                                    .child(div().flex_shrink_0().child(meta.agent.display_name()))
+                                    .child(badge(meta.project_name.clone(), theme.muted, theme.muted_foreground))
+                                    .when_some(meta.git_branch.clone(), |this, branch| {
+                                        this.child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .gap(SPACE_XS)
+                                                .child(icon("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0())
+                                                .child(div().min_w_0().truncate().child(branch)),
+                                        )
+                                    }),
                             )
                             .child(
                                 h_flex()
-                                    .absolute()
-                                    // 当前元素属于标题行，回移到上一层来源行。先按几何
-                                    // 中心线对齐，再向上补 3px，抵消按钮描边带来的视觉下沉。
-                                    .top(-px(36.5))
-                                    .right(SPACE_XXL)
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
                                     .child({
@@ -3163,6 +3149,16 @@ impl Workbench {
                                     ))
                                     .child(more_menu),
                             ),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .max_h(px(54.))
+                            .overflow_hidden()
+                            .text_size(FONT_TITLE)
+                            .line_height(relative(1.15))
+                            .font_semibold()
+                            .child(meta.title.clone()),
                     )
                     .child(
                         v_flex()
