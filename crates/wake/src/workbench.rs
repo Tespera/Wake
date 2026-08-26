@@ -2582,31 +2582,32 @@ impl Workbench {
                     .h(LIBRARY_IDENTITY_HEIGHT)
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
+                    .px(SPACE_LG)
+                    .justify_center()
                     .child(
                         h_flex()
-                            .h(WINDOW_TITLEBAR_HEIGHT)
-                            .px(SPACE_LG)
-                            .items_center()
+                            .w_full()
+                            .items_start()
                             .justify_between()
                             .child(
-                                div()
+                                v_flex()
                                     .min_w_0()
-                                    .truncate()
-                                    .text_size(FONT_TITLE)
-                                    .font_semibold()
-                                    .child(self.context_title()),
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(FONT_TITLE)
+                                            .font_semibold()
+                                            .child(self.context_title()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(FONT_LABEL)
+                                            .text_color(theme.muted_foreground)
+                                            .child(shown_label),
+                                    ),
                             )
-                            .child(div().flex_shrink_0().child(sort_menu)),
-                    )
-                    .child(
-                        h_flex()
-                            .h(WINDOW_TITLEBAR_HEIGHT)
-                            .px(SPACE_LG)
-                            .items_start()
-                            .pt(SPACE_SM)
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(shown_label),
+                            .child(div().flex_shrink_0().pt(px(2.)).child(sort_menu)),
                     ),
             )
             .child(if shown == 0 {
