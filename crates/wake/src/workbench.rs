@@ -3179,6 +3179,7 @@ impl Workbench {
                     )
                     .child(
                         v_flex()
+                            .w_full()
                             .min_w_0()
                             .pt(SPACE_MD)
                             .gap(SPACE_SM)
@@ -3209,10 +3210,16 @@ impl Workbench {
                             )
                             .when(has_detail_facts, |this| {
                                 this.child(
-                                    div()
+                                    h_flex()
+                                        .w_full()
                                         .min_w_0()
-                                        .truncate()
-                                        .child(detail_fact_line),
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(detail_fact_line),
+                                        ),
                                 )
                             })
                             .child(
