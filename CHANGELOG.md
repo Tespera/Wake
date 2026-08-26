@@ -4,8 +4,8 @@
 
 ## [0.2.11] — 2026-08-26
 
-- Update UI
-- Add Intel Mac support
+- Update: Update UI
+- New: Add Intel Mac support
 
 ## [0.2.10] — 2026-08-26
 
