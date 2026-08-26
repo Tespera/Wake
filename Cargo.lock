@@ -6804,7 +6804,7 @@ dependencies = [
 
 [[package]]
 name = "wake"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6822,7 +6822,7 @@ dependencies = [
 
 [[package]]
 name = "wake-core"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "chrono",
