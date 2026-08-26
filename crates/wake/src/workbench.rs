@@ -2272,7 +2272,7 @@ impl Workbench {
                     .flex_shrink_0()
                     .px(SIDEBAR_EDGE)
                     .pt(SPACE_SM)
-                    .pb(SPACE_MD)
+                    .pb(SPACE_SM)
                     .child(
                         div()
                             .pl(TITLE_INSET)

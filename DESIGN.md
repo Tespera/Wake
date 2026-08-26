@@ -125,6 +125,7 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 
 ### 资料库侧栏
 
+- 44px 窗口标题栏下方的 `Wake` 标题上下各留 8px，再进入搜索区，避免品牌标题偏向任一侧。
 - 顶部是唯一的全文搜索入口,文案 "Search sessions",右侧显示 `⌘K`;Search/All Sessions/Starred 固定不随滚动。
 - 搜索行必须有防溢出结构:标签文字 `flex_1 + min_w_0 + truncate`,图标与 `⌘K` 徽标显式 `flex_shrink_0`。裸文字子元素的最小宽度被内容锁死,侧栏一窄就会把右侧元素挤出边界裁掉。
 - **行分两级**(侧栏纵向层级的来源,不得拉平):主导航 All Sessions/Starred 32px 行高 + Body 14;分组展开项(agent/项目)26px 行高 + Caption 12 + 整行右移 `SUB_INDENT` 12px 表达从属。
