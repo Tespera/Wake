@@ -36,6 +36,18 @@ pub fn abs_date(ts: i64) -> String {
         .unwrap_or_default()
 }
 
+/// 详情页常显日期：精确时间放进 Hover，降低头部的信息密度。
+pub fn date_only(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
 pub fn fmt_tokens(n: Option<i64>) -> String {
     match n {
         None | Some(0) => String::new(),

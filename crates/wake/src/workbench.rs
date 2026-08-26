@@ -45,7 +45,9 @@ use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
-use crate::format::{abs_date, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path};
+use crate::format::{
+    abs_date, date_only, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path,
+};
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
 use crate::update::{self, UpdateStatus};
@@ -2947,10 +2949,18 @@ impl Workbench {
         }
         let has_detail_facts = !detail_facts.is_empty();
         let detail_fact_line: SharedString = detail_facts.join(" · ").into();
-        let created_time: Option<SharedString> =
-            (meta.created_at > 0).then(|| format!("Created {}", abs_date(meta.created_at)).into());
-        let updated_time: Option<SharedString> =
-            (meta.updated_at > 0).then(|| format!("Updated {}", abs_date(meta.updated_at)).into());
+        let created_time: Option<(SharedString, SharedString)> = (meta.created_at > 0).then(|| {
+            (
+                format!("Created {}", date_only(meta.created_at)).into(),
+                format!("Created {}", abs_date(meta.created_at)).into(),
+            )
+        });
+        let updated_time: Option<(SharedString, SharedString)> = (meta.updated_at > 0).then(|| {
+            (
+                format!("Updated {}", date_only(meta.updated_at)).into(),
+                format!("Updated {}", abs_date(meta.updated_at)).into(),
+            )
+        });
 
         v_flex()
             .flex_1()
@@ -3187,6 +3197,7 @@ impl Workbench {
                             .text_color(theme.muted_foreground)
                             .child(
                                 h_flex()
+                                    .w_full()
                                     .min_w_0()
                                     .gap(SPACE_MD)
                                     .items_center()
@@ -3206,22 +3217,17 @@ impl Workbench {
                                             };
                                             this.child(outline_badge(source, color))
                                         },
-                                    ),
-                            )
-                            .when(has_detail_facts, |this| {
-                                this.child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .child(
+                                    )
+                                    .when(has_detail_facts, |this| {
+                                        this.child(
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
                                                 .truncate()
                                                 .child(detail_fact_line),
-                                        ),
-                                )
-                            })
+                                        )
+                                    }),
+                            )
                             .child(
                                 h_flex()
                                     .min_w_0()
@@ -3251,22 +3257,36 @@ impl Workbench {
                                                 .gap(SPACE_XL)
                                                 .when_some(
                                                     created_time.clone(),
-                                                    |row, created| {
+                                                    |row, (created, tooltip)| {
                                                         row.child(
                                                             div()
+                                                                .id("detail-created-time")
                                                                 .min_w_0()
                                                                 .truncate()
-                                                                .child(created),
+                                                                .child(created)
+                                                                .tooltip(move |window, cx| {
+                                                                    gpui_component::tooltip::Tooltip::new(
+                                                                        tooltip.clone(),
+                                                                    )
+                                                                    .build(window, cx)
+                                                                }),
                                                         )
                                                     },
                                                 )
                                                 .when_some(
                                                     updated_time.clone(),
-                                                    |row, updated| {
+                                                    |row, (updated, tooltip)| {
                                                         row.child(
                                                             div()
+                                                                .id("detail-updated-time")
                                                                 .flex_shrink_0()
-                                                                .child(updated),
+                                                                .child(updated)
+                                                                .tooltip(move |window, cx| {
+                                                                    gpui_component::tooltip::Tooltip::new(
+                                                                        tooltip.clone(),
+                                                                    )
+                                                                    .build(window, cx)
+                                                                }),
                                                         )
                                                     },
                                                 ),
