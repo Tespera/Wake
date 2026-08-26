@@ -18,7 +18,8 @@ use crate::update::{self, UpdateStatus};
 use crate::workbench::{DataSourceRow, OpenAbout, OpenSettings, OpenUpdates, Workbench};
 use crate::{theme, theme::AppearancePreference};
 
-const SETTINGS_SIDEBAR_W: Pixels = px(188.);
+const SETTINGS_SIDEBAR_W: Pixels = px(180.);
+const SETTINGS_PAGE_TOP: Pixels = px(38.);
 
 fn icon(path: &'static str) -> Icon {
     Icon::empty().path(path)
@@ -277,7 +278,7 @@ impl SettingsView {
                 v_flex()
                     .flex_shrink_0()
                     .px(SPACE_XXL)
-                    .pt(px(44.))
+                    .pt(SETTINGS_PAGE_TOP)
                     .pb(SPACE_XL)
                     .gap(px(5.))
                     .child(
@@ -295,73 +296,63 @@ impl SettingsView {
                     ),
             )
             .child(
-                v_flex()
-                    .px(SPACE_XXL)
-                    .gap(SPACE_SM)
-                    .child(
-                        div()
-                            .text_size(FONT_CAPTION)
-                            .font_semibold()
-                            .text_color(theme.foreground)
-                            .child("Appearance"),
-                    )
-                    .child(
-                        h_flex()
-                            .min_h(px(72.))
-                            .w_full()
-                            .px(SPACE_LG)
-                            .gap(SPACE_LG)
-                            .items_center()
-                            .rounded(theme.radius_lg)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.popover)
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(px(3.))
-                                    .child(
-                                        div()
-                                            .text_size(FONT_BODY)
-                                            .text_color(theme.foreground)
-                                            .child("Appearance"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(FONT_CAPTION)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Follow the system or keep Wake light or dark."),
-                                    ),
-                            )
-                            .child(
-                                h_flex()
-                                    .h(BUTTON_SM_H + px(4.))
-                                    .p(px(2.))
-                                    .rounded(theme.radius)
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.secondary)
-                                    .child(self.appearance_button(
-                                        "appearance-system",
-                                        "System",
-                                        AppearancePreference::System,
-                                        cx,
-                                    ))
-                                    .child(self.appearance_button(
-                                        "appearance-light",
-                                        "Light",
-                                        AppearancePreference::Light,
-                                        cx,
-                                    ))
-                                    .child(self.appearance_button(
-                                        "appearance-dark",
-                                        "Dark",
-                                        AppearancePreference::Dark,
-                                        cx,
-                                    )),
-                            ),
-                    ),
+                v_flex().px(SPACE_XXL).child(
+                    h_flex()
+                        .min_h(px(72.))
+                        .w_full()
+                        .px(SPACE_LG)
+                        .gap(SPACE_LG)
+                        .items_center()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .text_size(FONT_BODY)
+                                        .text_color(theme.foreground)
+                                        .child("Appearance"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(theme.muted_foreground)
+                                        .child("Follow the system or keep Wake light or dark."),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .h(BUTTON_SM_H + px(4.))
+                                .p(px(2.))
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.secondary)
+                                .child(self.appearance_button(
+                                    "appearance-system",
+                                    "System",
+                                    AppearancePreference::System,
+                                    cx,
+                                ))
+                                .child(self.appearance_button(
+                                    "appearance-light",
+                                    "Light",
+                                    AppearancePreference::Light,
+                                    cx,
+                                ))
+                                .child(self.appearance_button(
+                                    "appearance-dark",
+                                    "Dark",
+                                    AppearancePreference::Dark,
+                                    cx,
+                                )),
+                        ),
+                ),
             )
             .into_any_element()
     }
@@ -400,7 +391,7 @@ impl SettingsView {
                 v_flex()
                     .flex_shrink_0()
                     .px(SPACE_XXL)
-                    .pt(px(44.))
+                    .pt(SETTINGS_PAGE_TOP)
                     .pb(SPACE_XL)
                     .gap(px(5.))
                     .child(
@@ -514,7 +505,7 @@ impl SettingsView {
                 v_flex()
                     .w(px(360.))
                     .items_center()
-                    .pt(px(64.))
+                    .pt(px(52.))
                     .child(
                         img("brands/wake.svg")
                             .size(px(78.))
@@ -626,7 +617,7 @@ impl SettingsView {
                 v_flex()
                     .flex_shrink_0()
                     .px(SPACE_XXL)
-                    .pt(px(44.))
+                    .pt(SETTINGS_PAGE_TOP)
                     .pb(SPACE_XL)
                     .gap(px(5.))
                     .child(
@@ -739,7 +730,6 @@ impl SettingsView {
             .px(SPACE_LG)
             .gap(SPACE_MD)
             .items_center()
-            .when(!enabled, |this| this.opacity(0.55))
             .child(
                 v_flex()
                     .flex_1()
@@ -750,13 +740,17 @@ impl SettingsView {
                             .w_full()
                             .truncate()
                             .text_size(FONT_BODY)
-                            .text_color(theme.foreground)
+                            .text_color(if enabled {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
                             .child(row.display),
                     )
                     .child(
                         div()
                             .text_size(FONT_CAPTION)
-                            .text_color(if exists {
+                            .text_color(if !enabled || exists {
                                 theme.muted_foreground
                             } else {
                                 theme.warning
@@ -876,7 +870,7 @@ impl SettingsView {
                 h_flex()
                     .flex_shrink_0()
                     .px(SPACE_XXL)
-                    .pt(px(44.))
+                    .pt(SETTINGS_PAGE_TOP)
                     .pb(SPACE_XL)
                     .gap(SPACE_LG)
                     .items_start()
@@ -950,7 +944,7 @@ impl SettingsView {
                                         .id("settings-unavailable-locations")
                                         .h(px(36.))
                                         .w_full()
-                                        .px(SPACE_SM)
+                                        .pr(SPACE_SM)
                                         .gap(SPACE_SM)
                                         .items_center()
                                         .rounded(theme.radius)
@@ -962,12 +956,20 @@ impl SettingsView {
                                             cx.notify();
                                         }))
                                         .child(
-                                            icon(if self.show_unavailable {
-                                                "icons/chevron-down.svg"
-                                            } else {
-                                                "icons/chevron-right.svg"
-                                            })
-                                            .with_size(px(13.)),
+                                            div()
+                                                .w(px(17.))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .child(
+                                                    icon(if self.show_unavailable {
+                                                        "icons/chevron-down.svg"
+                                                    } else {
+                                                        "icons/chevron-right.svg"
+                                                    })
+                                                    .with_size(px(13.)),
+                                                ),
                                         )
                                         .child(
                                             div()

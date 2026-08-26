@@ -24,7 +24,7 @@ pub fn relative_time(ts: i64) -> String {
     }
 }
 
-/// 绝对时间(详情页时间行):yyyy-MM-dd HH:mm:ss
+/// 详情页时间信息：保留到秒，避免相对时间丢失会话的精确时间上下文。
 pub fn abs_date(ts: i64) -> String {
     if ts <= 0 {
         return String::new();
@@ -46,8 +46,8 @@ pub fn fmt_tokens(n: Option<i64>) -> String {
     }
 }
 
-/// 进程内不变的 HOME,缓存住:折叠(tilde_path 经 display_file_path 落在
-/// 详情页 header,每帧都跑)与手输展开(expand_tilde)共用同一份
+/// 进程内不变的 HOME,缓存住:数据源路径折叠与手输展开(expand_tilde)
+/// 共用同一份。
 fn cached_home() -> Option<&'static str> {
     static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     HOME.get_or_init(|| {
@@ -63,8 +63,7 @@ fn cached_home() -> Option<&'static str> {
     .as_deref()
 }
 
-/// 绝对路径 → `~/…` 形式,**不折叠中段**。数据源面板要如实给出完整路径
-/// (display_file_path 那种 `~/a/…/file` 的折叠在那里会把信息吃掉)
+/// 绝对路径 → `~/…` 形式,**不折叠中段**。数据源面板要如实给出完整路径。
 pub fn tilde_path(p: &str) -> String {
     // 边界必须落在分隔符上:裸 starts_with 会把 HOME 的同名前缀兄弟目录
     // 也折叠掉(HOME=/Users/al 时 /Users/al-data → "~-data",一个并不存在
@@ -92,29 +91,6 @@ pub fn expand_tilde(p: &str) -> String {
             }
         }
         _ => p.to_string(),
-    }
-}
-
-/// 会话文件路径的展示形态(详情页路径行):SQLite 虚拟路径剥 `#<id>`、
-/// HOME 缩成 `~`、深路径折叠中段(根目录 + … + 文件名)。
-/// 仅用于展示——Reveal in Finder 仍传原始完整路径。
-pub fn display_file_path(path: &str) -> String {
-    // 虚拟路径 <db>#<id>:id 不是路径的一部分,展示到库文件为止
-    let p = path
-        .rsplit_once('#')
-        .filter(|(db, _)| db.ends_with(".db"))
-        .map(|(db, _)| db)
-        .unwrap_or(path);
-    let tilde = tilde_path(p);
-    let parts: Vec<&str> = tilde.split(std::path::is_separator).collect();
-    match (parts.first(), parts.get(1), parts.last()) {
-        // 超过 根/次级/…/文件 四段的深路径折叠中段(重拼用本平台主分隔符,
-        // Windows 展示 `~\a\…\file` 与系统一致)
-        (Some(root), Some(second), Some(file)) if parts.len() > 4 => {
-            let s = std::path::MAIN_SEPARATOR;
-            format!("{root}{s}{second}{s}…{s}{file}")
-        }
-        _ => tilde,
     }
 }
 

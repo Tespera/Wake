@@ -7,8 +7,8 @@
 //   lucide 单线图标、SF 系统字体 14px 基准;agent 品牌色仅作识别圆点。
 // STORY: 打开即见全部会话按时间流动;左栏收窄范围,中栏定位会话,右栏读全文;
 //   ⌘K 直达任意一句话;一键回到终端继续。
-// FIRST VIEWPORT: 全高三栏——240px 侧栏(全局搜索/全部/收藏/智能体/项目)、
-//   372px 会话列表(22px 上下文标题+双行卡),余宽详情(标题+操作+markdown 正文)。
+// FIRST VIEWPORT: 全高三栏——224px 侧栏(全局搜索/全部/收藏/智能体/项目)、
+//   336px 会话列表(上下文标题+会话数量+双行列表)，余宽为详情阅读器。
 // FORM: brief-pinned canon(用户指定"现代 macOS 设计规范",对标 Things/Bear);
 //   concept tournament 依规跳过,canon at full fidelity。
 // FINISH: unreviewed and undocumented is unfinished; this build ends with the
@@ -28,7 +28,6 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::notification::Notification;
-use gpui_component::progress::Progress;
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::spinner::Spinner;
 use gpui_component::text::{TextView, TextViewStyle};
@@ -46,9 +45,7 @@ use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
-use crate::format::{
-    abs_date, display_file_path, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path,
-};
+use crate::format::{abs_date, expand_tilde, fmt_tokens, one_line, relative_time, tilde_path};
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
 use crate::update::{self, UpdateStatus};
@@ -425,8 +422,8 @@ pub struct Workbench {
     /// 单一写入点就不会互相失步——把派生出的文案反过来当守卫,正是
     /// "扫描失败后刷新按钮再也点不动"的来源
     scan: ScanProgress,
-    /// 用户主动重扫中(模态进度弹窗开着,阻断其他操作)。与 scan.scanning 正交:
-    /// 那是"扫没扫",这是"要不要弹模态"
+    /// 用户主动发起的重扫。与 scan.scanning 正交：前者决定终态通知，后者是
+    /// 所有自动/手动扫描共用的实际运行状态。
     refreshing: bool,
     /// location 变更撞上进行中的扫描时置位:那轮扫描持旧 roster,不补扫的话
     /// 新根不收录、被移根不出清,要等手动 ⌘R(2026-08-24 Codex review)。
@@ -436,10 +433,6 @@ pub struct Workbench {
     settings_window: Option<AnyWindowHandle>,
     settings_page: SettingsPage,
     update_status: UpdateStatus,
-    /// 全量解析进度 (done, total);None = 仍在枚举文件。
-    /// 用 Rc<Cell> 而非 entity 字段:进度弹窗 builder 在本 entity 的
-    /// render 期间执行,entity.read(cx) 会 double-lease panic。
-    refresh_progress: Rc<Cell<Option<(usize, usize)>>>,
     total_sessions: i64,
 
     list_state: Entity<ListState<SessionsDelegate>>,
@@ -573,14 +566,11 @@ impl Workbench {
                     Ok(note) => note,
                     Err(_) => break,
                 };
-                // 手动 Refresh 的进度框只存在于主窗口。主窗口已关闭时状态
-                // 仍正常收尾，只是不再尝试展示无处承载的完成通知。
+                // 主窗口已关闭时状态仍正常收尾，只是不再尝试展示无处承载的
+                // 完成通知。后台刷新不应顺手关闭用户正在使用的搜索面板。
                 if let Some(note) = note {
                     main_window
-                        .update(cx, |_, window, cx| {
-                            window.close_dialog(cx);
-                            window.push_notification(note, cx);
-                        })
+                        .update(cx, |_, window, cx| window.push_notification(note, cx))
                         .ok();
                 }
             }
@@ -619,7 +609,6 @@ impl Workbench {
             settings_window: None,
             settings_page: SettingsPage::General,
             update_status: UpdateStatus::Idle,
-            refresh_progress: Rc::new(Cell::new(None)),
             total_sessions: 0,
             list_state,
             palette_list,
@@ -704,8 +693,8 @@ impl Workbench {
     }
 
     /// 手动全量重扫(菜单 File → Refresh Sessions,⌘R)。刷新中忽略重复触发。
-    /// 弹出模态进度弹窗阻断其他操作,完成后 on_bg_event 自动关闭。
-    fn refresh_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 扫描在后台进行，侧栏持续显示进度；浏览、搜索和阅读不被阻断。
+    fn refresh_sessions(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.scan.scanning {
             return;
         }
@@ -713,7 +702,6 @@ impl Workbench {
             scanning: true,
             ..Default::default()
         };
-        self.refresh_progress.set(None);
         self.refreshing = true;
         cx.notify();
         spawn_scan(
@@ -722,44 +710,6 @@ impl Workbench {
             self.scan_events.clone(),
             true,
         );
-
-        let shared_progress = self.refresh_progress.clone();
-        window.open_dialog(cx, move |dialog, _window, cx| {
-            let progress = shared_progress.get();
-            let theme = cx.theme();
-            let (pct, note) = match progress {
-                Some((done, total)) if total > 0 => (
-                    ((done as f32 / total as f32) * 100.).max(3.),
-                    format!("{done} of {total} sessions"),
-                ),
-                _ => (3., "Looking for sessions…".to_string()),
-            };
-            dialog
-                .w(px(380.))
-                .close_button(false)
-                .overlay_closable(false)
-                .keyboard(false)
-                .child(
-                    v_flex()
-                        .gap(SPACE_LG)
-                        .child(
-                            h_flex().gap(SPACE_SM).child(Spinner::new().small()).child(
-                                div()
-                                    .text_size(FONT_HEADING)
-                                    .font_semibold()
-                                    .text_color(theme.foreground)
-                                    .child("Refreshing sessions"),
-                            ),
-                        )
-                        .child(Progress::new().value(pct))
-                        .child(
-                            div()
-                                .text_size(FONT_CAPTION)
-                                .text_color(theme.muted_foreground)
-                                .child(note),
-                        ),
-                )
-        });
     }
 
     /// Settings/Locations 页的数据快照。路径与 active roster 来自同一次
@@ -923,7 +873,7 @@ impl Workbench {
             }
             workbench.update(cx, |this, _| this.settings_window = None);
         }
-        let bounds = Bounds::centered(None, size(px(880.), px(640.)), cx);
+        let bounds = Bounds::centered(None, size(px(820.), px(600.)), cx);
         let titlebar = if cfg!(target_os = "macos") {
             TitlebarOptions {
                 title: None,
@@ -942,7 +892,7 @@ impl Workbench {
             WindowOptions {
                 titlebar: Some(titlebar),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(740.), px(520.))),
+                window_min_size: Some(size(px(720.), px(520.))),
                 app_id: Some("wake-settings".into()),
                 window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()
@@ -1613,11 +1563,6 @@ impl Workbench {
     fn on_bg_event(&mut self, ev: BgEvent, cx: &mut Context<Self>) -> Option<Notification> {
         match ev {
             BgEvent::Progress(p) => {
-                self.refresh_progress.set(if p.total > 0 {
-                    Some((p.done, p.total))
-                } else {
-                    None
-                });
                 let note = if !p.scanning && self.refreshing {
                     self.refreshing = false;
                     Some(match &p.error {
@@ -1686,9 +1631,6 @@ impl Workbench {
     }
 
     pub fn toggle_search(&mut self, _: &ToggleSearch, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refreshing {
-            return;
-        }
         if window.has_active_dialog(cx) {
             window.close_dialog(cx);
             return;
@@ -2551,6 +2493,18 @@ impl Workbench {
     fn render_session_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let shown = self.list_state.read(cx).delegate().sessions.len();
+        let library_empty = self.agent_counts.iter().map(|(_, n)| *n).sum::<i64>() == 0;
+        let listed_count = self.total_sessions.max(0);
+        let shown_label: SharedString = format!(
+            "{} {}",
+            listed_count,
+            if listed_count == 1 {
+                "session"
+            } else {
+                "sessions"
+            }
+        )
+        .into();
         let sort_key = self.sort_key;
         let sort_ascending = self.sort_ascending;
         let sort_entity = cx.entity();
@@ -2559,14 +2513,21 @@ impl Workbench {
             SortKey::Created => "Date created",
             SortKey::Messages => "Message count",
         };
-        // ghost + 当前排序文案(outline/muted 胶囊都试过,用户定的 ghost)
+        let sort_tooltip = format!(
+            "Sort by {} · {}",
+            sort_label,
+            if sort_ascending {
+                "Ascending"
+            } else {
+                "Descending"
+            }
+        );
+        // 与详情工具栏统一：icon-only ghost，常态透明、hover 才出现背景。
         let sort_menu = Button::new("sort-sessions")
             .ghost()
-            .small()
             .rounded(RADIUS_BUTTON)
-            .icon(icon("icons/arrow-up-down.svg").with_size(px(13.)))
-            .label(sort_label)
-            .tooltip("Sort sessions")
+            .icon(icon("icons/arrow-up-down.svg").with_size(px(16.)))
+            .tooltip(sort_tooltip)
             .dropdown_menu(move |menu, _, _| {
                 let mk_key = |label: &'static str, key: SortKey| {
                     let entity = sort_entity.clone();
@@ -2607,6 +2568,7 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("list-header")
+                    .w_full()
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_LG)
@@ -2614,34 +2576,97 @@ impl Workbench {
                     .pb(SPACE_MD)
                     .child(
                         h_flex()
-                            .items_center()
+                            .items_start()
                             .justify_between()
                             .child(
-                                div()
-                                    .text_size(FONT_TITLE)
-                                    .font_semibold()
-                                    .child(self.context_title()),
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(FONT_TITLE)
+                                            .font_semibold()
+                                            .child(self.context_title()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(FONT_LABEL)
+                                            .text_color(theme.muted_foreground)
+                                            .child(shown_label),
+                                    ),
                             )
-                            .child(sort_menu),
+                            .child(div().pt(px(2.)).child(sort_menu)),
                     ),
             )
             .child(if shown == 0 {
-                v_flex()
-                    .flex_1()
-                    .justify_center()
-                    .child(empty_state(
-                        "icons/inbox.svg",
-                        px(48.),
-                        px(22.),
-                        "No matching sessions",
-                        "Try different filters or clear the query",
-                        cx,
-                    ))
-                    .into_any_element()
+                if library_empty && self.scan.scanning {
+                    v_flex()
+                        .flex_1()
+                        .w_full()
+                        .items_center()
+                        .justify_center()
+                        .gap(SPACE_MD)
+                        .text_color(theme.muted_foreground)
+                        .child(Spinner::new())
+                        .child(
+                            div()
+                                .text_size(FONT_BODY)
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child("Building your library"),
+                        )
+                        .child(
+                            div()
+                                .text_size(FONT_CAPTION)
+                                .child("Looking for local agent sessions…"),
+                        )
+                        .into_any_element()
+                } else if library_empty {
+                    v_flex()
+                        .flex_1()
+                        .w_full()
+                        .items_center()
+                        .justify_center()
+                        .gap(SPACE_LG)
+                        .child(empty_state(
+                            "icons/layers.svg",
+                            px(48.),
+                            px(22.),
+                            "Your library is empty",
+                            "Add a local session location to get started.",
+                            cx,
+                        ))
+                        .child(
+                            Button::new("empty-open-settings")
+                                .primary()
+                                .small()
+                                .rounded(RADIUS_BUTTON)
+                                .label("Add a location")
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.settings_page = SettingsPage::Locations;
+                                    this.open_settings(cx);
+                                })),
+                        )
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .flex_1()
+                        .w_full()
+                        .justify_center()
+                        .child(empty_state(
+                            "icons/inbox.svg",
+                            px(48.),
+                            px(22.),
+                            "No matching sessions",
+                            "Try a different agent, project, or filter.",
+                            cx,
+                        ))
+                        .into_any_element()
+                }
             } else {
                 List::new(&self.list_state)
                     .flex_1()
                     .min_h_0()
+                    .w_full()
                     .into_any_element()
             })
     }
@@ -2673,6 +2698,15 @@ impl Workbench {
         let Some(m) = transcript.get(ix) else {
             return div().into_any_element();
         };
+        // 只有 thinking、没有回复正文或工具调用的中间事件属于运行日志，
+        // 连续铺在阅读视图里会把真正的对话切碎；完整原始记录仍保留在源文件中。
+        if matches!(m.role, Role::Assistant)
+            && m.text.is_empty()
+            && m.tool_calls.is_empty()
+            && m.thinking.is_some()
+        {
+            return div().into_any_element();
+        }
         // 搜索跳转的落点消息:淡 primary 底色保持高亮,直到换会话
         let is_jump_target = jump_seq == Some(m.seq);
 
@@ -2689,8 +2723,8 @@ impl Workbench {
                             .min_w_0()
                             .rounded(theme.radius_lg)
                             .bg(theme.muted)
-                            .px(px(12.))
-                            .py(px(7.))
+                            .px(px(14.))
+                            .py(SPACE_SM)
                             .text_size(FONT_MSG_USER)
                             .child(
                                 TextView::markdown(
@@ -2705,21 +2739,24 @@ impl Workbench {
                                     is_dark: dark,
                                     ..Default::default()
                                 })
+                                .line_height(relative(1.45))
                                 .selectable(true),
                             ),
                     )
                     .into_any_element(),
                 Role::Assistant => {
-                    let mut col = v_flex().w_full().min_w_0().gap(px(6.));
-                    if let Some(th) = &m.thinking {
-                        col = col.child(
-                            div()
-                                .text_size(FONT_MSG_THINKING)
-                                .italic()
-                                .text_color(muted_fg)
-                                .truncate()
-                                .child(format!("Thinking · {}", one_line(th, 200))),
-                        );
+                    let mut col = v_flex().w_full().min_w_0().gap(SPACE_SM);
+                    if !m.text.is_empty() {
+                        if let Some(th) = &m.thinking {
+                            col = col.child(
+                                div()
+                                    .text_size(FONT_MSG_THINKING)
+                                    .italic()
+                                    .text_color(muted_fg)
+                                    .truncate()
+                                    .child(format!("Thinking · {}", one_line(th, 200))),
+                            );
+                        }
                     }
                     if !m.text.is_empty() {
                         col = col.child(
@@ -2736,6 +2773,7 @@ impl Workbench {
                                     is_dark: dark,
                                     ..Default::default()
                                 })
+                                .line_height(relative(1.5))
                                 .selectable(true),
                             ),
                         );
@@ -2768,9 +2806,9 @@ impl Workbench {
             .w_full()
             .flex()
             .justify_center()
-            // 10px:用户定稿(2026-08-18),16 显大 8 显小,不在 4px 网格上是有意的
-            .px(px(10.))
-            .py(px(6.))
+            // 与详情头共用 24px 阅读轴，正文、标题和元信息形成一条竖线。
+            .px(SPACE_XXL)
+            .py(SPACE_SM)
             .when(ix == 0, |d| d.pt(SPACE_LG))
             .when(ix + 1 == total, |d| d.pb(SPACE_XXL))
             .child(
@@ -2881,6 +2919,25 @@ impl Workbench {
             })
             .anchor(Corner::TopRight);
 
+        let detail_path: SharedString = if meta.project_path.is_empty() {
+            "Unknown project".to_string()
+        } else {
+            meta.project_path.clone()
+        }
+        .into();
+        let mut detail_facts: Vec<String> = Vec::new();
+        if meta.message_count > 0 {
+            detail_facts.push(format!("{} messages", meta.message_count));
+        }
+        if let Some(tokens) = meta.tokens_used {
+            detail_facts.push(format!("{} tokens", fmt_tokens(Some(tokens))));
+        }
+        let detail_fact_line: SharedString = detail_facts.join(" · ").into();
+        let created_time: Option<SharedString> =
+            (meta.created_at > 0).then(|| format!("Created {}", abs_date(meta.created_at)).into());
+        let updated_time: Option<SharedString> =
+            (meta.updated_at > 0).then(|| format!("Updated {}", abs_date(meta.updated_at)).into());
+
         v_flex()
             .flex_1()
             .min_w_0()
@@ -2890,14 +2947,20 @@ impl Workbench {
                 v_flex()
                     .id("detail-header")
                     .flex_shrink_0()
+                    .relative()
                     .window_control_area(WindowControlArea::Drag)
-                    .px(SPACE_LG)
+                    .px(SPACE_XXL)
                     .pt(SPACE_XL)
-                    .pb(SPACE_MD)
-                    .gap(SPACE_SM)
+                    .pb(SPACE_XL)
+                    .gap(SPACE_MD)
+                    .border_b_1()
+                    .border_color(theme.border)
                     .child(
                         h_flex()
+                            .min_w_0()
+                            .pr(px(156.))
                             .gap(SPACE_SM)
+                            .items_center()
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
@@ -2915,19 +2978,27 @@ impl Workbench {
                     )
                     .child(
                         h_flex()
+                            .items_start()
                             .justify_between()
                             .gap(SPACE_LG)
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
+                                    .max_h(px(54.))
+                                    .overflow_hidden()
                                     .text_size(FONT_TITLE)
+                                    .line_height(relative(1.15))
                                     .font_semibold()
-                                    .truncate()
                                     .child(meta.title.clone()),
                             )
                             .child(
                                 h_flex()
+                                    .absolute()
+                                    // 当前元素属于标题行，负偏移到上一层来源行；来源行右侧
+                                    // 已预留 156px，因此不会遮住 Agent / 项目 / 分支。
+                                    .top(-px(27.))
+                                    .right(SPACE_XXL)
                                     .flex_shrink_0()
                                     .gap(SPACE_XS)
                                     .child({
@@ -3094,95 +3165,72 @@ impl Workbench {
                             ),
                     )
                     .child(
-                        // 元信息四行收成 4px 紧组:与标题区之间保持 SPACE_SM,
-                        // "组内紧、组间松"——四行等距摊开读起来像四个并列区块
                         v_flex()
-                            .gap(SPACE_XS)
-                            .child(
-                        h_flex()
-                            .gap(px(6.))
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .child(icon("icons/folder.svg").with_size(px(12.)).flex_shrink_0())
-                            .child(div().min_w_0().truncate().child(
-                                if meta.project_path.is_empty() {
-                                    "Unknown project".to_string()
-                                } else {
-                                    meta.project_path.clone()
-                                },
-                            )),
-                    )
-                    .child({
-                        // 属性行:model / source outline badge + 统计;空值自动省略
-                        let mut stats: Vec<String> = Vec::new();
-                        if meta.message_count > 0 {
-                            stats.push(format!("{} messages", meta.message_count));
-                        }
-                        if let Some(tokens) = meta.tokens_used {
-                            stats.push(format!("{} tokens", fmt_tokens(Some(tokens))));
-                        }
-                        h_flex()
+                            .min_w_0()
+                            .pt(SPACE_XS)
                             .gap(SPACE_SM)
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
-                            .when_some(meta.model.clone(), |this, model| {
-                                this.child(outline_badge(
-                                    model,
-                                    rgb(crate::theme::MODEL_BADGE_BG).into(),
-                                ))
-                            })
-                            .when_some(
-                                meta.source.clone().filter(|s| !s.is_empty()),
-                                |this, source| {
-                                    // opencode2 是版本代际标记而非发起平台,
-                                    // 用 primary 蓝与 via 徽章(绿)区分
-                                    let color = if source == "opencode2" {
-                                        theme.primary
-                                    } else {
-                                        theme.success
-                                    };
-                                    this.child(outline_badge(source, color))
-                                },
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap(px(6.))
+                                    .child(
+                                        icon("icons/folder.svg")
+                                            .with_size(px(12.))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(div().min_w_0().truncate().child(detail_path)),
                             )
-                            .child(div().min_w_0().truncate().child(stats.join(" · ")))
-                    })
-                    .child({
-                        // 时间行:创建 / 最后活动,精确时间
-                        let mut times: Vec<String> = Vec::new();
-                        if meta.created_at > 0 {
-                            times.push(format!("Created {}", abs_date(meta.created_at)));
-                        }
-                        if meta.updated_at > 0 {
-                            times.push(format!("Updated {}", abs_date(meta.updated_at)));
-                        }
-                        div()
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .truncate()
-                            .child(times.join(" · "))
-                    })
-                    .child({
-                        // 会话文件路径(header 末行):展示用折叠形态(~ 缩写 +
-                        // 中段省略),点击在 Finder 中显示(传原始完整路径)
-                        let file_path = meta.file_path.clone();
-                        h_flex()
-                            .id("detail-file-path")
-                            .gap(px(6.))
-                            .text_size(FONT_LABEL)
-                            .text_color(theme.muted_foreground)
-                            .cursor_pointer()
-                            .hover(|s| s.text_colored(theme.foreground, FONT_LABEL))
-                            .on_click(move |_, _, _| {
-                                terminal::reveal_in_file_manager(&file_path);
-                            })
-                            .child(icon("icons/file-text.svg").with_size(px(12.)).flex_shrink_0())
-                            .child(div().min_w_0().truncate().child(display_file_path(&meta.file_path)))
-                    })
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap(SPACE_MD)
+                                    .items_center()
+                                    .when_some(meta.model.clone(), |this, model| {
+                                        this.child(outline_badge(
+                                            model,
+                                            rgb(crate::theme::MODEL_BADGE_BG).into(),
+                                        ))
+                                    })
+                                    .when_some(
+                                        meta.source.clone().filter(|s| !s.is_empty()),
+                                        |this, source| {
+                                            let color = if source == "opencode2" {
+                                                theme.primary
+                                            } else {
+                                                theme.success
+                                            };
+                                            this.child(outline_badge(source, color))
+                                        },
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .child(detail_fact_line),
+                                    ),
+                            )
+                            .when(created_time.is_some() || updated_time.is_some(), |this| {
+                                this.child(
+                                    h_flex()
+                                        .w_full()
+                                        .min_w_0()
+                                        .gap(SPACE_XL)
+                                        .when_some(created_time.clone(), |row, created| {
+                                            row.child(div().min_w_0().truncate().child(created))
+                                        })
+                                        .when_some(updated_time.clone(), |row, updated| {
+                                            row.child(div().flex_shrink_0().child(updated))
+                                        }),
+                                )
+                            }),
                     ),
             )
             .child(if detail.loading {
                 h_flex()
                     .flex_1()
+                    .bg(theme.popover)
                     .items_center()
                     .justify_center()
                     .gap(SPACE_SM)
@@ -3195,29 +3243,20 @@ impl Workbench {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px(SPACE_MD)
-                    .pb(SPACE_MD)
+                    .bg(theme.popover)
+                    .relative()
                     .child(
-                        div()
-                            .size_full()
-                            .rounded(theme.radius_lg)
-                            .bg(theme.popover)
-                            .relative()
-                            .child(
-                                gpui::list(detail.msg_list.clone(), move |ix, window, cx| {
-                                    entity
-                                        .upgrade()
-                                        .map(|e| {
-                                            e.update(cx, |this, cx| {
-                                                this.render_msg_row(ix, window, cx)
-                                            })
-                                        })
-                                        .unwrap_or_else(|| div().into_any_element())
+                        gpui::list(detail.msg_list.clone(), move |ix, window, cx| {
+                            entity
+                                .upgrade()
+                                .map(|e| {
+                                    e.update(cx, |this, cx| this.render_msg_row(ix, window, cx))
                                 })
-                                .size_full(),
-                            )
-                            .vertical_scrollbar(&detail.msg_list),
+                                .unwrap_or_else(|| div().into_any_element())
+                        })
+                        .size_full(),
                     )
+                    .vertical_scrollbar(&detail.msg_list)
                     .into_any_element()
             })
             .into_any_element()
