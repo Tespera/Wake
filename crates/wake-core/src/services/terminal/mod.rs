@@ -104,6 +104,7 @@ pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
     match agent {
         AgentId::ClaudeCode => Some("claude"),
         AgentId::Codex => Some("codex"),
+        AgentId::Qoder => Some("qoder"),
         AgentId::Copilot => Some("copilot"),
         AgentId::Cursor => Some("cursor-agent"),
         AgentId::Opencode => Some("opencode"),
@@ -124,6 +125,8 @@ fn resume_args(agent: AgentId, id: &str) -> Option<(Vec<String>, bool)> {
     match agent {
         AgentId::ClaudeCode => Some((vec!["--resume".into(), id.into()], true)),
         AgentId::Codex => Some((vec!["resume".into(), id.into()], false)),
+        // Qoder 的历史会话按 cwd 分桶，`--resume <id>` 需在原项目目录启动。
+        AgentId::Qoder => Some((vec!["--resume".into(), id.into()], true)),
         AgentId::Copilot => Some((vec![format!("--resume={id}")], false)),
         AgentId::Cursor => Some((vec!["--resume".into(), id.into()], false)),
         // 参数形制与 kooky 的 resume 集成一致(空格/等号是各家 CLI 实测约束)

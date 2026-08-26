@@ -1,4 +1,4 @@
-//! 十三家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
+//! 十四家 adapter 的解析契约测试:全部走公开 API(`AgentAdapter` trait),
 //! fixture 为全合成数据(tests/fixtures/,SQLite 型在临时 HOME 里现建,
 //! dsh 的 zstd 日志由检入的明文 fixture 在临时 HOME 里压制)。
 //!
@@ -25,6 +25,7 @@ use wake_core::adapters::kimi::KimiAdapter;
 use wake_core::adapters::kiro::KiroAdapter;
 use wake_core::adapters::opencode::OpencodeAdapter;
 use wake_core::adapters::pi::PiAdapter;
+use wake_core::adapters::qoder::QoderAdapter;
 use wake_core::adapters::AgentAdapter;
 use wake_core::models::*;
 
@@ -122,6 +123,7 @@ fn setup() -> &'static TestEnv {
         // 去读真实库(实测 opencode 的两个契约测试会因此挂掉)
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("CODEX_HOME");
+        std::env::remove_var("QODER_CONFIG_DIR");
         TestEnv {
             copilot_db,
             opencode_db,
@@ -356,6 +358,24 @@ fn codex_ref() -> SessionFileRef {
         "22222222-aaaa-bbbb-cccc-000000000002",
     )
 }
+fn qoder_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Qoder,
+        &fixture(
+            "qoder/projects/-Users-tester-Github-wakefx/abababab-aaaa-bbbb-cccc-000000000014.jsonl",
+        ),
+        "abababab-aaaa-bbbb-cccc-000000000014",
+    )
+}
+fn qoder_null_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Qoder,
+        &fixture(
+            "qoder/projects/-Users-tester-Github-wakefx/cdcdcdcd-aaaa-bbbb-cccc-000000000015.jsonl",
+        ),
+        "cdcdcdcd-aaaa-bbbb-cccc-000000000015",
+    )
+}
 fn cursor_ref() -> SessionFileRef {
     fs_ref(
         AgentId::Cursor,
@@ -528,6 +548,91 @@ fn codex_parse_contract() {
         s.units.iter().map(|u| u.seq).collect::<Vec<_>>(),
         vec![1, 2, 3]
     );
+}
+
+#[test]
+fn qoder_parse_contract() {
+    setup();
+    let adapter = QoderAdapter::new();
+    let r = qoder_ref();
+    let s = adapter.parse_session(&r).expect("qoder parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("qoder parse_transcript");
+
+    assert_eq!(s.meta.key, "qoder:abababab-aaaa-bbbb-cccc-000000000014");
+    assert_eq!(s.meta.title, "Qoder active branch title");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx-relocated");
+    assert_eq!(s.meta.project_name, "wakefx-relocated");
+    assert_eq!(s.meta.git_branch.as_deref(), Some("feature/qoder"));
+    assert_eq!(s.meta.model.as_deref(), Some("qoder-performance"));
+    assert_eq!(s.meta.tokens_used, Some(160));
+    assert_eq!(s.meta.message_count, 4);
+    assert_eq!(s.unknown_line_count, 1);
+    assert_eq!(
+        roles_kinds(&t.mainline),
+        vec![
+            (Role::User, MessageKind::Meta),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+            (Role::User, MessageKind::Text),
+            (Role::Assistant, MessageKind::Text),
+        ]
+    );
+    assert!(t
+        .mainline
+        .iter()
+        .all(|message| !message.text.contains("废弃")));
+    let tool_host = &t.mainline[2];
+    assert!(tool_host.text.contains("我先定位相关 effect"));
+    assert_eq!(tool_host.tool_calls.len(), 1);
+    assert_eq!(tool_host.tool_calls[0].name, "Grep");
+    assert!(tool_host.tool_calls[0]
+        .output
+        .as_deref()
+        .unwrap_or_default()
+        .contains("QrScanner.tsx:42"));
+    assert!(tool_host
+        .thinking
+        .as_deref()
+        .unwrap_or_default()
+        .contains("清理回调"));
+    assert_eq!(
+        s.units.iter().map(|unit| unit.seq).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+
+    // 默认 projects 根只枚举 project-key 直属会话，不能吸入会话边车。
+    let rooted = QoderAdapter::new().with_custom_root(fixture("qoder/projects"));
+    let refs = rooted.list_session_files().expect("qoder list sessions");
+    assert_eq!(refs.len(), 2);
+    assert!(refs.iter().any(|session| session.native_id == r.native_id));
+    assert_eq!(rooted.session_paths(&s.meta).len(), 2);
+    let sideagent = fixture(
+        "qoder/projects/-Users-tester-Github-wakefx/abababab-aaaa-bbbb-cccc-000000000014/subagents/agent-child.jsonl",
+    );
+    assert!(rooted.file_ref(&sideagent).is_none());
+}
+
+#[test]
+fn qoder_explicit_null_active_leaf_is_empty() {
+    setup();
+    let adapter = QoderAdapter::new();
+    let r = qoder_null_ref();
+    let s = adapter
+        .parse_session(&r)
+        .expect("qoder empty parse_session");
+    let t = adapter
+        .parse_transcript(&r)
+        .expect("qoder empty parse_transcript");
+
+    assert_eq!(s.meta.title, "Qoder empty rewind");
+    assert_eq!(s.meta.project_path, "/Users/tester/Github/wakefx-null");
+    assert_eq!(s.meta.message_count, 0);
+    assert_eq!(s.meta.tokens_used, None);
+    assert!(s.units.is_empty());
+    assert!(t.mainline.is_empty());
+    assert_eq!(s.unknown_line_count, 0);
 }
 
 #[test]
@@ -1212,13 +1317,13 @@ fn overlapping_watch_roots_dispatch_to_deepest() {
 
 #[test]
 fn data_roots_contract() {
-    // roster 单实例契约:create_adapters 返回全量十三家(不按 detect 过滤,
+    // roster 单实例契约:create_adapters 返回全量十四家(不按 detect 过滤,
     // scanner 对缺根家靠各自 list_session_files 降级为空);每家必须给出
     // 绝对路径的数据根——"Session locations" 面板、watch_paths 派生、按
     // (agent, 根) 计数全都建立在它上面
     let _env = setup();
     let adapters = wake_core::adapters::create_adapters();
-    assert_eq!(adapters.len(), 13, "全量 roster 必须十三家,含本机没装的");
+    assert_eq!(adapters.len(), 14, "全量 roster 必须十四家,含本机没装的");
     for a in &adapters {
         let tag = a.agent().as_str();
         let roots = a.data_roots();
@@ -1368,6 +1473,7 @@ fn seq_contract_holds_for_all_agents() {
     let checks: Vec<(Box<dyn AgentAdapter>, SessionFileRef)> = vec![
         (Box::new(ClaudeAdapter::new()), claude_ref()),
         (Box::new(CodexAdapter::new()), codex_ref()),
+        (Box::new(QoderAdapter::new()), qoder_ref()),
         (
             Box::new(CopilotAdapter::new()),
             db_ref(AgentId::Copilot, &env.copilot_db, "cop-0001"),
@@ -1565,7 +1671,7 @@ fn with_custom_root_contract() {
 
 /// AgentId::ALL 是侧栏/面板/表单下拉共用的顺序事实源:必须与枚举声明序
 /// (= Ord,用户 2026-08-20 钉的展示序)严格一致,且与 roster 的 agent 集合
-/// 等同——第十四家漏进任何一份名单,在这里爆而不是静默从下拉里消失
+/// 等同——第十五家漏进任何一份名单,在这里爆而不是静默从下拉里消失
 #[test]
 fn agent_id_all_matches_ord_and_roster() {
     setup();
@@ -1589,7 +1695,7 @@ fn agent_id_all_matches_ord_and_roster() {
 fn removed_defaults_suppress_instances() {
     setup();
     let roster = wake_core::adapters::create_adapters_with(&[], &[AgentId::ClaudeCode]);
-    assert_eq!(roster.len(), 12);
+    assert_eq!(roster.len(), 13);
     assert!(roster.iter().all(|a| a.agent() != AgentId::ClaudeCode));
 
     let dir = tempfile::tempdir().unwrap();
@@ -1832,13 +1938,13 @@ fn adapter_ix_for_routes_to_owning_instance() {
     let custom = dir.path().to_path_buf();
     let roster =
         wake_core::adapters::create_adapters_with(&[(AgentId::ClaudeCode, custom.clone())], &[]);
-    assert_eq!(roster.len(), 14, "13 默认 + 1 自定义");
-    assert_eq!(roster[13].agent(), AgentId::ClaudeCode);
+    assert_eq!(roster.len(), 15, "14 默认 + 1 自定义");
+    assert_eq!(roster[14].agent(), AgentId::ClaudeCode);
 
     let under = format!("{}/projects/p/x.jsonl", custom.display());
     assert_eq!(
         wake_core::adapters::adapter_ix_for(&roster, AgentId::ClaudeCode, &under),
-        Some(13),
+        Some(14),
         "自定义根下的文件应路由到自定义实例"
     );
     // 兄弟目录(裸前缀)不得吸入

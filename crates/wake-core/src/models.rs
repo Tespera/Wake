@@ -18,13 +18,14 @@ pub enum AgentId {
     Gemini,
     Copilot,
     Antigravity,
+    Qoder,
 }
 
 impl AgentId {
-    /// 全部十三家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
+    /// 全部十四家,**枚举声明序**(= Ord = 用户钉的侧栏展示序;面板成组、
     /// 表单下拉共用同一顺序)。曾误抄 create_adapters 的构造序,下拉与侧栏
     /// 排序当场对不上——契约测试现在卡它与 Ord 一致
-    pub const ALL: [AgentId; 13] = [
+    pub const ALL: [AgentId; 14] = [
         AgentId::ClaudeCode,
         AgentId::Codex,
         AgentId::Grok,
@@ -38,12 +39,14 @@ impl AgentId {
         AgentId::Gemini,
         AgentId::Copilot,
         AgentId::Antigravity,
+        AgentId::Qoder,
     ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             AgentId::ClaudeCode => "claude-code",
             AgentId::Codex => "codex",
+            AgentId::Qoder => "qoder",
             AgentId::Copilot => "copilot",
             AgentId::Cursor => "cursor",
             AgentId::Opencode => "opencode",
@@ -62,6 +65,7 @@ impl AgentId {
         match s {
             "claude-code" => Some(AgentId::ClaudeCode),
             "codex" => Some(AgentId::Codex),
+            "qoder" => Some(AgentId::Qoder),
             "copilot" => Some(AgentId::Copilot),
             "cursor" => Some(AgentId::Cursor),
             "opencode" => Some(AgentId::Opencode),
@@ -81,6 +85,7 @@ impl AgentId {
         match self {
             AgentId::ClaudeCode => "Claude Code",
             AgentId::Codex => "Codex",
+            AgentId::Qoder => "Qoder CLI",
             AgentId::Copilot => "Copilot CLI",
             AgentId::Cursor => "Cursor",
             AgentId::Opencode => "OpenCode",
@@ -99,11 +104,19 @@ impl AgentId {
     /// 与 kooky 同源)。后缀必须带上(与 SVG 图标同理,漏后缀 = 静默空白)。
     /// Copilot/Cursor/OpenCode/Pi/Grok/Kimi 是单色字形(白色+alpha):深色模式
     /// 用白色版,浅色模式用 `-light`(深墨 #2B2A26)版——等效 kooky 的染色;
-    /// 彩色品牌(Claude/Codex/Gemini/Kiro/Omp/Antigravity)保持原色,两模式通用。
+    /// Qoder 是白/黑字形配绿色品牌色,同样按模式切图；其余彩色品牌
+    /// (Claude/Codex/Gemini/Kiro/Omp/Antigravity)保持原色,两模式通用。
     pub fn brand_icon(&self, dark: bool) -> &'static str {
         match self {
             AgentId::ClaudeCode => "brands/claude-code.png",
             AgentId::Codex => "brands/codex.png",
+            AgentId::Qoder => {
+                if dark {
+                    "brands/qoder.png"
+                } else {
+                    "brands/qoder-light.png"
+                }
+            }
             AgentId::Copilot => {
                 if dark {
                     "brands/copilot.png"

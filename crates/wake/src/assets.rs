@@ -37,6 +37,8 @@ macro_rules! brands {
 brands!(
     "claude-code",
     "codex",
+    "qoder",
+    "qoder-light",
     "copilot",
     "copilot-light",
     "cursor",

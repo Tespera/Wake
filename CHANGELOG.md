@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New: Qoder CLI support — sessions under `~/.qoder/projects` are searchable, branch-aware, and resumable with `qoder --resume`; `QODER_CONFIG_DIR` and custom locations are supported
+
 ## [0.2.9] — 2026-08-25
 
 - Update: Session location management now lives in a dedicated Settings window, available from the sidebar gear, the Wake menu, or `⌘,`

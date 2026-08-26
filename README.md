@@ -9,7 +9,7 @@
 
 A native desktop app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5). macOS first; experimental Linux support since v0.2.5, experimental Windows support since v0.2.7.
 
-Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
+Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
 
 ![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
 
@@ -29,6 +29,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and ten other pr
 |---|---|---|---|
 | Claude Code | `~/.claude/projects/**/*.jsonl` | ✅ | — |
 | Codex CLI | `~/.codex/sessions` + `state_5.sqlite` (read-only) | ✅ | ✅ |
+| Qoder CLI | `~/.qoder/projects/*/*.jsonl` (`QODER_CONFIG_DIR` is respected) | ✅ | — |
 | Copilot CLI | `~/.copilot/session-store.db` | — | — |
 | Cursor (CLI transcripts) | `~/.cursor/projects/**/agent-transcripts` | — | — |
 | OpenCode | `~/.local/share/opencode/opencode.db` | ✅ | — |
