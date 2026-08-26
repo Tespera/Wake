@@ -76,6 +76,7 @@ icons!(
     "pin",
     "download",
     "folder",
+    "calendar",
     "trash-2",
     "search",
     "arrow-up-down",

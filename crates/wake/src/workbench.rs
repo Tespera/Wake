@@ -2945,6 +2945,7 @@ impl Workbench {
         if let Some(tokens) = meta.tokens_used {
             detail_facts.push(format!("{} tokens", fmt_tokens(Some(tokens))));
         }
+        let has_detail_facts = !detail_facts.is_empty();
         let detail_fact_line: SharedString = detail_facts.join(" · ").into();
         let created_time: Option<SharedString> =
             (meta.created_at > 0).then(|| format!("Created {}", abs_date(meta.created_at)).into());
@@ -3186,17 +3187,6 @@ impl Workbench {
                             .child(
                                 h_flex()
                                     .min_w_0()
-                                    .gap(px(6.))
-                                    .child(
-                                        icon("icons/folder.svg")
-                                            .with_size(px(12.))
-                                            .flex_shrink_0(),
-                                    )
-                                    .child(div().min_w_0().truncate().child(detail_path)),
-                            )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
                                     .gap(SPACE_MD)
                                     .items_center()
                                     .when_some(meta.model.clone(), |this, model| {
@@ -3215,26 +3205,65 @@ impl Workbench {
                                             };
                                             this.child(outline_badge(source, color))
                                         },
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .child(detail_fact_line),
                                     ),
+                            )
+                            .when(has_detail_facts, |this| {
+                                this.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .child(detail_fact_line),
+                                )
+                            })
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .gap(px(6.))
+                                    .child(
+                                        icon("icons/folder.svg")
+                                            .with_size(px(12.))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(div().min_w_0().truncate().child(detail_path)),
                             )
                             .when(created_time.is_some() || updated_time.is_some(), |this| {
                                 this.child(
                                     h_flex()
                                         .w_full()
                                         .min_w_0()
-                                        .gap(SPACE_XL)
-                                        .when_some(created_time.clone(), |row, created| {
-                                            row.child(div().min_w_0().truncate().child(created))
-                                        })
-                                        .when_some(updated_time.clone(), |row, updated| {
-                                            row.child(div().flex_shrink_0().child(updated))
-                                        }),
+                                        .gap(px(6.))
+                                        .items_center()
+                                        .child(
+                                            icon("icons/calendar.svg")
+                                                .with_size(px(12.))
+                                                .flex_shrink_0(),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .min_w_0()
+                                                .gap(SPACE_XL)
+                                                .when_some(
+                                                    created_time.clone(),
+                                                    |row, created| {
+                                                        row.child(
+                                                            div()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .child(created),
+                                                        )
+                                                    },
+                                                )
+                                                .when_some(
+                                                    updated_time.clone(),
+                                                    |row, updated| {
+                                                        row.child(
+                                                            div()
+                                                                .flex_shrink_0()
+                                                                .child(updated),
+                                                        )
+                                                    },
+                                                ),
+                                        ),
                                 )
                             }),
                     ),
