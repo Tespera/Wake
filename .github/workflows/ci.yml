@@ -15,12 +15,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-24.04, windows-2022]
+        os: [macos-15, ubuntu-24.04, windows-2022]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Intel macOS target
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -46,3 +50,7 @@ jobs:
       # GPUI 窗口层仍以三平台编译通过为门槛
       - name: Build app
         run: cargo build -p wake
+
+      - name: Build app for Intel macOS
+        if: runner.os == 'macOS'
+        run: cargo build -p wake --target x86_64-apple-darwin

@@ -67,23 +67,25 @@ jobs:
           fi
 
   macos:
-    name: macOS zip
+    name: macOS universal zip
     needs: release
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # make-app.sh 出 dist/Wake.app(ad-hoc 签名,与本机产物同规格),
-      # ditto 打 zip 保签名与资源结构
+      # 双 target 构建后由 lipo 合成 Universal Binary，再做 ad-hoc 签名；
+      # ditto 打 zip 保签名与资源结构。
       - name: Package
         run: |
-          scripts/make-app.sh
+          scripts/make-app.sh --universal
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           ditto -c -k --keepParent --sequesterRsrc dist/Wake.app "dist/Wake-${VERSION}-macos.zip"
 

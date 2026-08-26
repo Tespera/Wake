@@ -1,12 +1,23 @@
 #!/bin/zsh
 # 构建 Wake.app:release 二进制 + icns 图标 + Info.plist,ad-hoc 签名。
-# 用法: scripts/make-app.sh [--run]
+# 用法: scripts/make-app.sh [--universal] [--run]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ASSETS=crates/wake/assets
-BUILD=target/release
+TARGET_DIR=${CARGO_TARGET_DIR:-target}
+BUILD="$TARGET_DIR/release"
 APP=dist/Wake.app
+RUN=false
+UNIVERSAL=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --run) RUN=true ;;
+    --universal) UNIVERSAL=true ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 # 1. 图标:svg → 1024 png(ImageIO 渲染,保透明;qlmanage 会把透明边距填成白底) → iconset → icns
 if [ ! -f "$ASSETS/icon-1024.png" ] || [ "$ASSETS/icon.svg" -nt "$ASSETS/icon-1024.png" ]; then
@@ -22,8 +33,21 @@ done
 mkdir -p dist
 iconutil -c icns "$ICONSET" -o dist/wake.icns
 
-# 2. release 构建
-cargo build --release -p wake
+# 2. release 构建。Universal 模式在同一 macOS SDK 上交叉编译两个 Rust
+# target，再用 lipo 合并；目标标准库由调用方预先通过 rustup 安装。
+if $UNIVERSAL; then
+  ARM_TARGET=aarch64-apple-darwin
+  INTEL_TARGET=x86_64-apple-darwin
+  cargo build --release -p wake --target "$ARM_TARGET"
+  cargo build --release -p wake --target "$INTEL_TARGET"
+  mkdir -p "$BUILD"
+  lipo -create \
+    "$TARGET_DIR/$ARM_TARGET/release/Wake" \
+    "$TARGET_DIR/$INTEL_TARGET/release/Wake" \
+    -output "$BUILD/Wake"
+else
+  cargo build --release -p wake
+fi
 
 # 3. bundle 组装
 rm -rf "$APP"
@@ -59,8 +83,18 @@ PLIST
 
 # 4. ad-hoc 签名(本机运行足够;分发需开发者证书 + notarize)
 codesign --force --deep -s - "$APP"
+codesign --verify --deep --strict "$APP"
+
+if $UNIVERSAL; then
+  ARCHS=$(lipo -archs "$APP/Contents/MacOS/Wake")
+  if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
+    echo "Universal build is missing an architecture: $ARCHS" >&2
+    exit 1
+  fi
+  echo "✓ architectures: $ARCHS"
+fi
 
 echo "✓ $APP"
-if [ "${1:-}" = "--run" ]; then
+if $RUN; then
   open "$APP"
 fi

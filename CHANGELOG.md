@@ -4,6 +4,7 @@
 
 ## [0.2.11] — 2026-08-26
 
+- New: Intel Mac support through a Universal macOS release
 - Update: refreshed the UI
 
 ## [0.2.10] — 2026-08-26

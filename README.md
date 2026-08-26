@@ -60,13 +60,15 @@ On the author's machine (~310 sessions, ~800 MB of JSONL): full index ~5 s, subs
 
 ## Install
 
-Download `Wake-<version>-macos.zip` from the [latest release](https://github.com/iAmCorey/Wake/releases/latest), unzip, and drag Wake to Applications. Or build from source (requires a Rust toolchain):
+Download `Wake-<version>-macos.zip` from the [latest release](https://github.com/iAmCorey/Wake/releases/latest), unzip, and drag Wake to Applications. The release is a Universal Binary for both Apple Silicon and Intel Macs. Or build from source (requires a Rust toolchain):
 
 ```bash
 git clone https://github.com/iAmCorey/Wake && cd Wake
 scripts/make-app.sh          # builds dist/Wake.app (icon + Info.plist, ad-hoc signed)
 open dist/Wake.app
 ```
+
+To build the same Universal Binary locally, install the `aarch64-apple-darwin` and `x86_64-apple-darwin` Rust targets, then run `scripts/make-app.sh --universal`.
 
 The app is ad-hoc signed, so if you download a prebuilt copy instead of building it yourself, macOS Gatekeeper will block the first launch — right-click the app and choose *Open*, or run `xattr -d com.apple.quarantine Wake.app`.
 
