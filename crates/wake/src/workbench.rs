@@ -2963,7 +2963,6 @@ impl Workbench {
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_XXL)
                     .pb(SPACE_XL)
-                    .gap(SPACE_MD)
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
@@ -3162,19 +3161,25 @@ impl Workbench {
                             ),
                     )
                     .child(
-                        div()
+                        h_flex()
+                            .w_full()
+                            .h(WINDOW_TITLEBAR_HEIGHT)
                             .min_w_0()
-                            .max_h(px(54.))
-                            .overflow_hidden()
-                            .text_size(FONT_TITLE)
-                            .line_height(relative(1.15))
-                            .font_semibold()
-                            .child(meta.title.clone()),
+                            .items_center()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(FONT_TITLE)
+                                    .line_height(relative(1.15))
+                                    .font_semibold()
+                                    .child(meta.title.clone()),
+                            ),
                     )
                     .child(
                         v_flex()
                             .min_w_0()
-                            .pt(SPACE_XS)
+                            .pt(SPACE_MD)
                             .gap(SPACE_SM)
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
