@@ -2990,7 +2990,7 @@ impl Workbench {
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_XXL)
-                    .pb(SPACE_XL)
+                    .pb(SPACE_SM)
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
@@ -3208,7 +3208,7 @@ impl Workbench {
                         v_flex()
                             .w_full()
                             .min_w_0()
-                            .pt(SPACE_MD)
+                            .pt(SPACE_SM)
                             .gap(SPACE_SM)
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
