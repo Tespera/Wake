@@ -2578,30 +2578,29 @@ impl Workbench {
                     .w_full()
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
-                    .px(SPACE_LG)
-                    .pt(SPACE_XL)
-                    .pb(SPACE_MD)
                     .child(
                         h_flex()
-                            .items_start()
+                            .h(WINDOW_TITLEBAR_HEIGHT)
+                            .px(SPACE_LG)
+                            .items_center()
                             .justify_between()
                             .child(
-                                v_flex()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .text_size(FONT_TITLE)
-                                            .font_semibold()
-                                            .child(self.context_title()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(FONT_LABEL)
-                                            .text_color(theme.muted_foreground)
-                                            .child(shown_label),
-                                    ),
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(FONT_TITLE)
+                                    .font_semibold()
+                                    .child(self.context_title()),
                             )
-                            .child(div().pt(px(2.)).child(sort_menu)),
+                            .child(div().flex_shrink_0().child(sort_menu)),
+                    )
+                    .child(
+                        div()
+                            .px(SPACE_LG)
+                            .pb(SPACE_MD)
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.muted_foreground)
+                            .child(shown_label),
                     ),
             )
             .child(if shown == 0 {
