@@ -70,8 +70,8 @@ pub const PALETTE_CONTEXT: &str = "WakePalette";
 const PALETTE_HEIGHT: Pixels = px(492.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
 const FORM_LABEL_W: Pixels = px(52.);
-/// macOS 透明窗口标题栏与 gpui-component TitleBar 的固定高度。
-const WINDOW_TITLEBAR_HEIGHT: Pixels = px(34.);
+/// Wake 主窗口的透明标题栏高度。28px 详情操作条上下各保留约 6px。
+const WINDOW_TITLEBAR_HEIGHT: Pixels = px(40.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -2260,8 +2260,11 @@ impl Workbench {
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
-            // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token,不再叠加覆写
-            .when(show_titlebar, |this| this.child(TitleBar::new()))
+            // 压平 titlebar 靠 theme.rs 的 title_bar/title_bar_border token；主窗口
+            // 使用 40px 高度，与详情顶部行共享同一垂直节奏。
+            .when(show_titlebar, |this| {
+                this.child(TitleBar::new().h(WINDOW_TITLEBAR_HEIGHT))
+            })
             .child(
                 div()
                     .flex_shrink_0()
