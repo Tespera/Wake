@@ -70,9 +70,6 @@ pub const PALETTE_CONTEXT: &str = "WakePalette";
 const PALETTE_HEIGHT: Pixels = px(492.);
 /// location 表单标签列宽(Agent/Folder 两行共用)
 const FORM_LABEL_W: Pixels = px(52.);
-/// 三栏首个可见标题内容的共同起点：34px 原生窗口标题栏净空 + 8px 内容间距。
-/// 中栏与详情栏只用透明留白追平侧栏 TitleBar，不绘制额外背景或分隔结构。
-const PANE_HEADER_CONTENT_TOP: Pixels = px(42.);
 
 type SharedAdapters = Arc<Vec<Box<dyn AgentAdapter>>>;
 type SharedLocations = Arc<Vec<AdapterLocation>>;
@@ -2575,7 +2572,7 @@ impl Workbench {
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_LG)
-                    .pt(PANE_HEADER_CONTENT_TOP)
+                    .pt(SPACE_XL)
                     .pb(SPACE_MD)
                     .child(
                         h_flex()
@@ -2953,7 +2950,7 @@ impl Workbench {
                     .relative()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_XXL)
-                    .pt(PANE_HEADER_CONTENT_TOP)
+                    .pt(SPACE_XL)
                     .pb(SPACE_XL)
                     .gap(SPACE_MD)
                     .border_b_1()
