@@ -2271,8 +2271,8 @@ impl Workbench {
                 div()
                     .flex_shrink_0()
                     .px(SIDEBAR_EDGE)
-                    .pt(SPACE_SM)
-                    .pb(SPACE_SM)
+                    .pt(SPACE_XS)
+                    .pb(SPACE_LG)
                     .child(
                         div()
                             .pl(TITLE_INSET)
