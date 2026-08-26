@@ -19,6 +19,8 @@ gpui-component = { version = "0.5", features = ["tree-sitter-languages"] }
 futures = "0.3"
 chrono.workspace = true
 dirs.workspace = true
+semver.workspace = true
+reqwest.workspace = true
 
 # exe 图标 + 版本资源(build.rs 里按 CARGO_CFG_TARGET_OS 判目标生效)。
 # 不做 target 门控:build-dependencies 的 [target.*] 匹配语义在 host/target

@@ -6804,7 +6804,7 @@ dependencies = [
 
 [[package]]
 name = "wake"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6812,15 +6812,17 @@ dependencies = [
  "futures",
  "gpui",
  "gpui-component",
+ "semver",
  "serde",
  "serde_json",
  "wake-core",
  "winresource",
+ "zed-reqwest",
 ]
 
 [[package]]
 name = "wake-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7976,6 +7978,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

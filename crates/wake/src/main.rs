@@ -11,14 +11,15 @@ mod format;
 mod settings;
 mod theme;
 mod ui;
+mod update;
 mod workbench;
 
 use assets::Assets;
 use gpui::*;
 use gpui_component::Root;
 use workbench::{
-    OpenAbout, OpenSettings, PaletteDown, PaletteUp, RefreshSessions, ToggleSearch, Workbench,
-    KEY_CONTEXT, PALETTE_CONTEXT,
+    OpenAbout, OpenSettings, OpenUpdates, PaletteDown, PaletteUp, RefreshSessions, ToggleSearch,
+    Workbench, KEY_CONTEXT, PALETTE_CONTEXT,
 };
 
 actions!(wake_app, [Quit, CloseWindow]);
@@ -47,16 +48,19 @@ fn main() {
             KeyBinding::new("up", PaletteUp, Some(PALETTE_CONTEXT)),
             KeyBinding::new("down", PaletteDown, Some(PALETTE_CONTEXT)),
         ]);
+        let mut wake_menu_items = vec![MenuItem::action("About Wake", OpenAbout)];
+        #[cfg(target_os = "macos")]
+        wake_menu_items.push(MenuItem::action("Check for Updates…", OpenUpdates));
+        wake_menu_items.extend([
+            MenuItem::separator(),
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action("Quit Wake", Quit),
+        ]);
         cx.set_menus(vec![
             Menu {
                 name: "Wake".into(),
-                items: vec![
-                    MenuItem::action("About Wake", OpenAbout),
-                    MenuItem::separator(),
-                    MenuItem::action("Settings…", OpenSettings),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit Wake", Quit),
-                ],
+                items: wake_menu_items,
             },
             Menu {
                 name: "File".into(),

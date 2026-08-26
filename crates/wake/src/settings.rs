@@ -4,8 +4,8 @@ use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{
-    h_flex, v_flex, ActiveTheme as _, Icon, Root, Selectable as _, Sizable as _, StyledExt as _,
-    TitleBar, WindowExt as _,
+    h_flex, v_flex, ActiveTheme as _, Disableable as _, Icon, Root, Selectable as _, Sizable as _,
+    StyledExt as _, TitleBar, WindowExt as _,
 };
 
 use wake_core::models::AgentId;
@@ -14,7 +14,8 @@ use crate::ui::{
     BUTTON_SM_H, FONT_BODY, FONT_CAPTION, FONT_DISPLAY, FONT_HEADING, FONT_LABEL, FONT_TITLE,
     RADIUS_BUTTON, SHOW_IN_FM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXL,
 };
-use crate::workbench::{DataSourceRow, OpenAbout, OpenSettings, Workbench};
+use crate::update::{self, UpdateStatus};
+use crate::workbench::{DataSourceRow, OpenAbout, OpenSettings, OpenUpdates, Workbench};
 use crate::{theme, theme::AppearancePreference};
 
 const SETTINGS_SIDEBAR_W: Pixels = px(188.);
@@ -44,12 +45,12 @@ pub(crate) enum SettingsPage {
     General,
     Locations,
     Data,
+    Updates,
     About,
 }
 
-/// Settings 内所有文字按钮共用一套尺寸和材质；避免页面各自混用
-/// outline / primary / 默认 ButtonGroup 后形成多套视觉语言。设置页里的
-/// 页面动作都保持低强调，确认弹窗里的最终提交才使用 primary。
+/// Settings 内常规文字按钮共用一套尺寸和材质；避免页面各自混用
+/// outline / primary / 默认 ButtonGroup 后形成多套视觉语言。
 fn settings_button(button: Button, cx: &App) -> Button {
     let theme = cx.theme();
     button
@@ -62,6 +63,23 @@ fn settings_button(button: Button, cx: &App) -> Button {
                 .active(theme.secondary_active),
         )
         .small()
+        .rounded(RADIUS_BUTTON)
+}
+
+/// 设置页里真正需要用户继续完成的主操作。保持 6px 圆角，但使用中号高度、
+/// primary 填充和轻阴影，让它与普通的重试 / 再检查动作拉开层级。
+fn settings_primary_button(button: Button, cx: &App) -> Button {
+    let theme = cx.theme();
+    button
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .color(theme.primary)
+                .foreground(theme.primary_foreground)
+                .border(theme.primary)
+                .hover(theme.primary_hover)
+                .active(theme.primary_active)
+                .shadow(true),
+        )
         .rounded(RADIUS_BUTTON)
 }
 
@@ -181,13 +199,26 @@ impl SettingsView {
                         cx,
                     )),
             )
-            .child(div().px(SPACE_SM).pb(SPACE_SM).child(self.render_nav_item(
-                "settings-about-nav",
-                "About",
-                "icons/info.svg",
-                SettingsPage::About,
-                cx,
-            )))
+            .child(
+                v_flex()
+                    .px(SPACE_SM)
+                    .pb(SPACE_SM)
+                    .gap(px(2.))
+                    .child(self.render_nav_item(
+                        "settings-updates-nav",
+                        "Updates",
+                        "icons/download.svg",
+                        SettingsPage::Updates,
+                        cx,
+                    ))
+                    .child(self.render_nav_item(
+                        "settings-about-nav",
+                        "About",
+                        "icons/info.svg",
+                        SettingsPage::About,
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -544,6 +575,114 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn render_updates(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let status = self.workbench.read(cx).update_status().clone();
+        let checking = matches!(status, UpdateStatus::Checking);
+        let update_available = matches!(status, UpdateStatus::Available { .. });
+        let status_message: SharedString = match &status {
+            UpdateStatus::Idle => "Check GitHub Releases for a newer version.".into(),
+            UpdateStatus::Checking => "Checking GitHub Releases…".into(),
+            UpdateStatus::UpToDate { latest } => {
+                format!("No newer release is available (latest: {latest}).").into()
+            }
+            UpdateStatus::Available { latest } => {
+                format!("Wake {latest} is available. Open the release page to download it.").into()
+            }
+            UpdateStatus::Failed => {
+                "Couldn't check for updates. Check your connection and try again.".into()
+            }
+        };
+        let button_label = match status {
+            UpdateStatus::Idle => "Check for Updates",
+            UpdateStatus::Checking => "Checking…",
+            UpdateStatus::UpToDate { .. } => "Check Again",
+            UpdateStatus::Available { .. } => "View Update",
+            UpdateStatus::Failed => "Try Again",
+        };
+        let button = Button::new("settings-check-updates")
+            .label(button_label)
+            .disabled(checking);
+        let mut action = if update_available {
+            settings_primary_button(button, cx)
+        } else {
+            settings_button(button, cx)
+        };
+        if update_available {
+            action = action.on_click(|_, _, cx| cx.open_url(update::LATEST_RELEASE_PAGE));
+        } else {
+            let workbench = self.workbench.clone();
+            action = action.on_click(move |_, _, cx| {
+                workbench.update(cx, |this, cx| this.check_for_updates(cx));
+            });
+        }
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(
+                v_flex()
+                    .flex_shrink_0()
+                    .px(SPACE_XXL)
+                    .pt(px(44.))
+                    .pb(SPACE_XL)
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .text_size(FONT_TITLE)
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .child("Updates"),
+                    )
+                    .child(
+                        div()
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .child("Keep Wake up to date."),
+                    ),
+            )
+            .child(
+                v_flex().px(SPACE_XXL).child(
+                    h_flex()
+                        .min_h(px(84.))
+                        .w_full()
+                        .px(SPACE_LG)
+                        .gap(SPACE_LG)
+                        .items_center()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .text_size(FONT_BODY)
+                                        .text_color(theme.foreground)
+                                        .child(format!("Wake {}", env!("CARGO_PKG_VERSION"))),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(FONT_CAPTION)
+                                        .text_color(if matches!(status, UpdateStatus::Failed) {
+                                            theme.danger
+                                        } else {
+                                            theme.muted_foreground
+                                        })
+                                        .child(status_message),
+                                ),
+                        )
+                        .child(action),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_location_row(&self, row: DataSourceRow, ix: usize, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let enabled = row.enabled;
@@ -866,6 +1005,7 @@ impl Render for SettingsView {
             SettingsPage::General => self.render_general(cx),
             SettingsPage::Locations => self.render_locations(cx).into_any_element(),
             SettingsPage::Data => self.render_data(cx),
+            SettingsPage::Updates => self.render_updates(cx),
             SettingsPage::About => self.render_about(cx),
         };
         div()
@@ -878,6 +1018,10 @@ impl Render for SettingsView {
             .on_action(cx.listener(|this, _: &OpenAbout, _window, cx| {
                 this.workbench
                     .update(cx, |workbench, cx| workbench.open_about(cx));
+            }))
+            .on_action(cx.listener(|this, _: &OpenUpdates, _window, cx| {
+                this.workbench
+                    .update(cx, |workbench, cx| workbench.open_updates(cx));
             }))
             .size_full()
             .bg(background)

@@ -39,6 +39,10 @@ jobs:
       - name: Test wake-core
         run: cargo test -p wake-core
 
-      # UI 层无测试套件(gpui),编译通过即门槛
+      # UI crate 内不启动窗口的纯逻辑单测；联网测试标为 ignored
+      - name: Test app logic
+        run: cargo test -p wake
+
+      # GPUI 窗口层仍以三平台编译通过为门槛
       - name: Build app
         run: cargo build -p wake

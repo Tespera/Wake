@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+## [0.2.10] — 2026-08-26
+
 - New: Qoder CLI support — sessions under `~/.qoder/projects` are searchable, branch-aware, and resumable with `qoder --resume`; `QODER_CONFIG_DIR` and custom locations are supported
+- New: Settings has a dedicated Updates page that checks the latest GitHub Release on demand and opens the release page when an update is available; the macOS Wake menu can start the same check
+- Update: the View Update action now uses a taller primary button so available releases are easier to spot
+- Fix: update checks run outside GPUI's async runtime instead of getting stuck at Checking
 
 ## [0.2.9] — 2026-08-25
 

@@ -9,7 +9,7 @@
 
 A native desktop app that gathers every coding-agent session on your machine into one place — browse, full-text search, and resume any conversation in seconds. Built with **Rust + GPUI** (gpui 0.2 + gpui-component 0.5). macOS first; experimental Linux support since v0.2.5, experimental Windows support since v0.2.7.
 
-Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local: no network requests, ever.
+Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen other private directories. Wake reads them all, read-only, and gives you one fast window into it. Everything stays local; Wake only contacts GitHub when you explicitly check for an update.
 
 ![Wake — sessions list and transcript view](imgs/screenshot-1.webp)
 
@@ -51,7 +51,7 @@ Cursor IDE chats, Windsurf, and Trae encrypt their local data; Amp, Factory (Dro
 
 - Agent data directories are opened **read-only**; Wake never writes to another tool's files or databases
 - Credential files (`auth.json` and friends) are never read
-- Zero network requests — Wake never constructs or calls an HTTP client (GPUI's dependency tree bundles one; Wake doesn't reach for it)
+- No background network requests — the only network action is a user-initiated update check against Wake's public GitHub Release metadata; session data is never sent
 - Wake's own index lives at `~/Library/Application Support/wake/wake.db` (Linux: `~/.local/share/wake`, Windows: `%LOCALAPPDATA%\wake`) and can be rebuilt from scratch at any time (stars/pins live in a separate table and survive rebuilds)
 
 ## Performance

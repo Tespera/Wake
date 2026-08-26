@@ -51,6 +51,7 @@ use crate::format::{
 };
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
+use crate::update::{self, UpdateStatus};
 
 actions!(
     wake,
@@ -58,6 +59,7 @@ actions!(
         ToggleSearch,
         RefreshSessions,
         OpenSettings,
+        OpenUpdates,
         OpenAbout,
         PaletteUp,
         PaletteDown
@@ -433,6 +435,7 @@ pub struct Workbench {
     /// Settings 是单例窗口；句柄不保活，关闭后下次点击会检测失败并重建。
     settings_window: Option<AnyWindowHandle>,
     settings_page: SettingsPage,
+    update_status: UpdateStatus,
     /// 全量解析进度 (done, total);None = 仍在枚举文件。
     /// 用 Rc<Cell> 而非 entity 字段:进度弹窗 builder 在本 entity 的
     /// render 期间执行,entity.read(cx) 会 double-lease panic。
@@ -615,6 +618,7 @@ impl Workbench {
             pending_rescan: false,
             settings_window: None,
             settings_page: SettingsPage::General,
+            update_status: UpdateStatus::Idle,
             refresh_progress: Rc::new(Cell::new(None)),
             total_sessions: 0,
             list_state,
@@ -839,6 +843,10 @@ impl Workbench {
         self.settings_page
     }
 
+    pub(crate) fn update_status(&self) -> &UpdateStatus {
+        &self.update_status
+    }
+
     pub(crate) fn select_settings_page(&mut self, page: SettingsPage, cx: &mut Context<Self>) {
         self.settings_page = page;
         cx.notify();
@@ -848,6 +856,50 @@ impl Workbench {
         self.settings_page = SettingsPage::About;
         cx.notify();
         self.open_settings(cx);
+    }
+
+    pub(crate) fn open_updates(&mut self, cx: &mut Context<Self>) {
+        self.settings_page = SettingsPage::Updates;
+        cx.notify();
+        self.open_settings(cx);
+        self.check_for_updates(cx);
+    }
+
+    pub(crate) fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.update_status, UpdateStatus::Checking) {
+            return;
+        }
+        self.update_status = UpdateStatus::Checking;
+        cx.notify();
+
+        // reqwest::blocking 会自行创建 Tokio runtime；若直接放进 GPUI 的异步
+        // executor，runtime 嵌套会 panic，界面便会永远停在 Checking。让阻塞
+        // 请求待在独立系统线程里，再用 oneshot 把结果送回 UI executor。
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        std::thread::spawn(|| {
+            let _ = sender.send(update::check_latest_release(env!("CARGO_PKG_VERSION")));
+        });
+        cx.spawn(async move |this, cx| {
+            let status = match receiver.await {
+                Ok(Ok(info)) if info.update_available => UpdateStatus::Available {
+                    latest: info.latest_version.to_string(),
+                },
+                Ok(Ok(info)) => UpdateStatus::UpToDate {
+                    latest: info.latest_version.to_string(),
+                },
+                Ok(Err(error)) => {
+                    eprintln!("update check failed: {error:#}");
+                    UpdateStatus::Failed
+                }
+                Err(_) => UpdateStatus::Failed,
+            };
+            this.update(cx, |this, cx| {
+                this.update_status = status;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 打开单例 Settings 窗口。开窗必须 defer 到当前 Workbench update 退出
@@ -3613,6 +3665,7 @@ impl Render for Workbench {
                 this.refresh_sessions(window, cx)
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| this.open_settings(cx)))
+            .on_action(cx.listener(|this, _: &OpenUpdates, _window, cx| this.open_updates(cx)))
             .on_action(cx.listener(|this, _: &OpenAbout, _window, cx| this.open_about(cx)))
             .size_full()
             .bg(theme.background)
