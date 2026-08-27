@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: in a Codex branch or subagent thread, the parent conversation's transcript is injected as a `user` message — its assistant replies were being shown as if you had typed them, and were indexed for search. They are now treated as injected context, like the other `<environment_context>`-style blocks
+
 ## [0.3.0] — 2026-08-27
 
 - New: Insights page — a new sidebar entry showing your coding agent activity at a glance: sessions, tokens, prompts, agents, projects, and active days
