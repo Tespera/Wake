@@ -20,6 +20,7 @@ Your agent history is scattered across `~/.claude`, `~/.codex`, and a dozen othe
 - **Transcript view** — per-message rendering with user/assistant bubbles, collapsible tool-call clusters, thinking summaries, tree-sitter code highlighting (30+ languages)
 - **One-click resume** — reopens the session in your terminal (Terminal/iTerm on macOS; native terminal hosts on Linux and Windows) at the original project directory (`claude --resume`, `codex resume`, …)
 - **Manage** — star/pin (stored in Wake's own DB, original files untouched), export to Markdown, delete (system Trash + tombstone so deleted sessions stay deleted)
+- **Insights** — a stats page for your whole library: GitHub-style activity heatmap with streaks, hour / weekday / month breakdowns, and Agents / Projects / Models leaderboards switchable between sessions, tokens, and prompts
 
 ![Full-text search across every agent's sessions](imgs/screenshot-2.webp)
 
@@ -119,8 +120,8 @@ CI runs `cargo test -p wake-core` plus a full app build on every push to main an
 ```
 crates/
 ├── wake-core        # pure data layer, no UI dependencies
-│   ├── adapters/    #   claude / codex / copilot / cursor / opencode / kiro / gemini
-│   │                #   pi / omp / grok / kimi / antigravity / dsh
+│   ├── adapters/    #   claude / codex / qoder / copilot / cursor / opencode / kiro
+│   │                #   gemini / pi / omp / grok / kimi / antigravity / dsh
 │   │                #   (AgentAdapter trait — add an adapter, get the whole UI for free)
 │   ├── scanner.rs   #   single-pass scan: meta + FTS in one go, mtime incremental
 │   ├── watcher.rs   #   notify-based file watching → per-file incremental updates
@@ -129,7 +130,7 @@ crates/
 └── wake             # GPUI app (three-pane workbench + ⌘K / Ctrl+K palette)
 ```
 
-Design notes live in [DESIGN.md](DESIGN.md), product decisions in [PRODUCT.md](PRODUCT.md).
+Design notes live in [DESIGN.md](DESIGN.md), product decisions in [PRODUCT.md](PRODUCT.md), release history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Star History
 
