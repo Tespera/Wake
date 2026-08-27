@@ -45,7 +45,9 @@ use wake_core::scanner::{run_scan, ScanEvents, ScanProgress};
 use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
-use crate::format::{abs_date, expand_tilde, fmt_tokens, one_line, smart_time, tilde_path};
+use crate::format::{
+    abs_date, expand_tilde, fmt_tokens, month_year, one_line, smart_time, thousands, tilde_path,
+};
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
 use crate::update::{self, UpdateStatus};
@@ -469,6 +471,17 @@ pub struct Workbench {
 
     detail: Option<DetailState>,
 
+    /// Insights 页(侧栏底部入口):打开时替换中栏+右栏。与其他导航目的地
+    /// 互斥(侧栏单选模型);数据在 open/refresh 时后台重算,Rc 免深拷贝
+    insights_open: bool,
+    insights: Option<Rc<InsightsData>>,
+    insights_loading: bool,
+    insights_range: InsightsRange,
+    /// 三个榜单各自的度量档,按 UsageBoard 序数索引
+    insights_metrics: [InsightsMetric; 3],
+    /// 进行中的统计查询;新查询覆盖旧值即取消,扫描风暴下不堆积读锁竞争
+    insights_task: Option<Task<()>>,
+
     scan_events: Arc<dyn ScanEvents>,
     watcher: Option<SessionWatcher>,
     /// 终端 id → 提取好的应用图标 png(后台 JXA 提取,详情页 Open In 用)
@@ -476,6 +489,118 @@ pub struct Workbench {
     /// Open In 上次选择(split 按钮左段直开目标),None = 已装列表首个
     preferred_terminal: Option<terminal::TerminalApp>,
     _subs: Vec<Subscription>,
+}
+
+/// Insights 分布图的维度(‹ › 循环切换)。数据三份都在 InsightsData 里,
+/// 切换是纯视图状态,不触发重查
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InsightsRange {
+    Hour,
+    Weekday,
+    Month,
+}
+
+impl InsightsRange {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Hour => "By hour",
+            Self::Weekday => "By weekday",
+            Self::Month => "By month",
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::Hour => Self::Month,
+            Self::Weekday => Self::Hour,
+            Self::Month => Self::Weekday,
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Hour => Self::Weekday,
+            Self::Weekday => Self::Month,
+            Self::Month => Self::Hour,
+        }
+    }
+}
+
+/// 榜单(Agents/Top projects/Models)的度量维度,‹ › 循环切换、每个榜单
+/// 各自记忆档位。Tokens 只在组内有人报过用量时进入循环——tokens=0 语义
+/// 是"不报"而非"用了 0"
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InsightsMetric {
+    Sessions,
+    Prompts,
+    Tokens,
+}
+
+impl InsightsMetric {
+    fn caption(self) -> &'static str {
+        match self {
+            Self::Sessions => "Sessions",
+            Self::Prompts => "Prompts",
+            Self::Tokens => "Tokens",
+        }
+    }
+
+    fn value(self, u: &UsageTally) -> i64 {
+        match self {
+            Self::Sessions => u.sessions,
+            Self::Prompts => u.prompts,
+            Self::Tokens => u.tokens,
+        }
+    }
+
+    fn display(self, u: &UsageTally) -> String {
+        match self {
+            Self::Tokens => fmt_tokens(Some(u.tokens)),
+            _ => thousands(self.value(u)),
+        }
+    }
+}
+
+/// 三个榜单的静态规格。`Workbench::insights_metrics` 按其序数索引各自
+/// 记忆档位——同一个渲染方法靠它读写自己的状态,不必外传 setter
+#[derive(Clone, Copy)]
+enum UsageBoard {
+    Agents,
+    Projects,
+    Models,
+}
+
+impl UsageBoard {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Agents => "Agents",
+            Self::Projects => "Projects",
+            Self::Models => "Models",
+        }
+    }
+
+    fn arrow_id(self) -> &'static str {
+        match self {
+            Self::Agents => "agents-arrow",
+            Self::Projects => "projects-arrow",
+            Self::Models => "models-arrow",
+        }
+    }
+
+    /// Agents 全量列出(总共十四家);项目/模型长尾长,取前 6
+    fn limit(self) -> usize {
+        match self {
+            Self::Agents => usize::MAX,
+            _ => 6,
+        }
+    }
+
+    fn name_w(self) -> Pixels {
+        match self {
+            Self::Models => px(176.),
+            _ => px(128.),
+        }
+    }
 }
 
 /// Settings/Locations 的一行(= 一个数据源路径)。文本字段用 SharedString，
@@ -640,6 +765,12 @@ impl Workbench {
             palette_input,
             _palette_search_task: None,
             detail: None,
+            insights_open: false,
+            insights: None,
+            insights_loading: false,
+            insights_range: InsightsRange::Hour,
+            insights_metrics: [InsightsMetric::Sessions; 3],
+            insights_task: None,
             scan_events,
             watcher,
             terminal_icons: HashMap::new(),
@@ -714,7 +845,52 @@ impl Workbench {
         self.agent_counts = counts;
         self.projects = self.store.list_projects().unwrap_or_default();
         self.starred_count = self.store.starred_count().unwrap_or(0);
+        // Insights 打开着就顺带重算:扫描增量/收藏变更等一切走 refresh 的
+        // 路径都会让页面数据跟上,不设第二条失效通道
+        self.reload_insights(cx);
         cx.notify();
+    }
+
+    /// 侧栏底部入口。再点一次(或点任意导航行)退回会话列表
+    fn toggle_insights(&mut self, cx: &mut Context<Self>) {
+        if self.insights_open {
+            self.insights_open = false;
+            cx.notify();
+            return;
+        }
+        self.insights_open = true;
+        // 互斥单选:Insights 是独立目的地,退出时落回 All Sessions
+        self.selected_agent = None;
+        self.selected_project = None;
+        self.favorite_only = false;
+        self.refresh(cx);
+    }
+
+    /// messages 全表分桶几十毫秒量级,走后台;已有数据时静默换新不闪 loading。
+    /// 扫描进行中 Changed 事件每秒都来,有旧数据就先按住——终态 Progress
+    /// 会补最后一次;新任务覆盖 insights_task 即取消旧查询,不堆积读锁竞争
+    fn reload_insights(&mut self, cx: &mut Context<Self>) {
+        if !self.insights_open {
+            return;
+        }
+        if self.scan.scanning && self.insights.is_some() {
+            return;
+        }
+        self.insights_loading = self.insights.is_none();
+        let store = self.store.clone();
+        let task =
+            cx.background_spawn(async move { store.insights(chrono::Local::now().date_naive()) });
+        self.insights_task = Some(cx.spawn(async move |this, cx| {
+            let data = task.await;
+            this.update(cx, |this, cx| {
+                if let Ok(data) = data {
+                    this.insights = Some(Rc::new(data));
+                }
+                this.insights_loading = false;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     /// 手动全量重扫(菜单 File → Refresh Sessions,⌘R)。刷新中忽略重复触发。
@@ -1604,6 +1780,10 @@ impl Workbench {
                     self.pending_rescan = false;
                     self.kick_incremental_scan(cx);
                 }
+                // 扫描期间 reload_insights 被按住(见其注释),终态补最后一次
+                if !self.scan.scanning {
+                    self.reload_insights(cx);
+                }
                 cx.notify();
                 note
             }
@@ -1968,13 +2148,26 @@ impl Workbench {
         .detach();
     }
 
+    /// 侧栏目的地互斥的唯一写入点:三个筛选字段与"离开 Insights"一起落,
+    /// 每个导航行只算自己的目标值——新目的地不必再逐个 listener 补互斥
+    fn set_scope(
+        &mut self,
+        agent: Option<AgentId>,
+        project: Option<String>,
+        favorite: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_agent = agent;
+        self.selected_project = project;
+        self.favorite_only = favorite;
+        self.insights_open = false;
+        self.refresh(cx);
+    }
+
     /// 清空过滤回 All Sessions 视图(侧栏点击与搜索打开共用;
     /// 已在 All Sessions 时 refresh 幂等,微秒级)
     fn show_all_sessions(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_agent = None;
-        self.selected_project = None;
-        self.favorite_only = false;
-        self.refresh(cx);
+        self.set_scope(None, None, false, cx);
     }
 
     /// 搜索命中打开:侧栏切回 All Sessions(搜索是全库范围,过滤视图下
@@ -2220,8 +2413,10 @@ impl Workbench {
 
     fn render_sidebar(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let all_active =
-            self.selected_agent.is_none() && self.selected_project.is_none() && !self.favorite_only;
+        let all_active = self.selected_agent.is_none()
+            && self.selected_project.is_none()
+            && !self.favorite_only
+            && !self.insights_open;
         // 常态沉默,仅刷新中/监听失效时出现;None 时状态栏整行不渲染。
         // 文案在此按 scan 现算,不另存字段——存下来就会有第二个写入点要维护
         let note = if self.scan.scanning {
@@ -2374,12 +2569,10 @@ impl Workbench {
                         self.favorite_only,
                         RowLevel::Primary,
                         cx.listener(|this, _, _window, cx| {
-                            this.favorite_only = !this.favorite_only;
-                            if this.favorite_only {
-                                this.selected_agent = None;
-                                this.selected_project = None;
-                            }
-                            this.refresh(cx);
+                            // 取消收藏过滤时 agent/project 必已是 None(互斥),
+                            // 两个方向都归 set_scope
+                            let favorite = !this.favorite_only;
+                            this.set_scope(None, None, favorite, cx);
                         }),
                         cx,
                     )),
@@ -2415,14 +2608,12 @@ impl Workbench {
                                 self.selected_agent == Some(agent),
                                 RowLevel::Sub,
                                 cx.listener(move |this, _, _window, cx| {
-                                    this.selected_agent = if this.selected_agent == Some(agent) {
+                                    let next = if this.selected_agent == Some(agent) {
                                         None
                                     } else {
                                         Some(agent)
                                     };
-                                    this.selected_project = None;
-                                    this.favorite_only = false;
-                                    this.refresh(cx);
+                                    this.set_scope(next, None, false, cx);
                                 }),
                                 cx,
                             )
@@ -2449,16 +2640,14 @@ impl Workbench {
                                 self.selected_project.as_deref() == Some(p.path.as_str()),
                                 RowLevel::Sub,
                                 cx.listener(move |this, _, _window, cx| {
-                                    this.selected_project = if this.selected_project.as_deref()
+                                    let next = if this.selected_project.as_deref()
                                         == Some(path.as_str())
                                     {
                                         None
                                     } else {
                                         Some(path.clone())
                                     };
-                                    this.selected_agent = None;
-                                    this.favorite_only = false;
-                                    this.refresh(cx);
+                                    this.set_scope(None, next, false, cx);
                                 }),
                                 cx,
                             )
@@ -2489,6 +2678,22 @@ impl Workbench {
                             .items_center()
                             .justify_end()
                             .gap(SPACE_XS)
+                            .child(sidebar_tool_btn(
+                                "insights",
+                                "Insights",
+                                true,
+                                // 页面打开时图标点亮 primary(显式设色后不被
+                                // hover 的容器 text_color 覆盖)
+                                {
+                                    let mut ic = icon("icons/chart-column.svg").with_size(px(14.));
+                                    if self.insights_open {
+                                        ic = ic.text_color(theme.primary);
+                                    }
+                                    ic.into_any_element()
+                                },
+                                cx.listener(|this, _, _window, cx| this.toggle_insights(cx)),
+                                cx,
+                            ))
                             .child(sidebar_tool_btn(
                                 "settings",
                                 "Settings",
@@ -2864,6 +3069,304 @@ impl Workbench {
             .into_any_element()
     }
 
+    // ---------------- Insights ----------------
+
+    /// Insights 整页(替换中栏+右栏)。头部沿用中栏 88px 标题节奏兼窗口
+    /// 拖拽区;内容 720px 阅读宽居中,区块只用留白与组头分隔,不做卡片墙
+    fn render_insights(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        // 副标题只说 "Since {首会话月份}"(用户定稿);拿不到时间时回落默认句
+        let subtitle: SharedString = match &self.insights {
+            Some(d) if d.sessions > 0 => match month_year(d.first_ts) {
+                my if my.is_empty() => "Your coding agent activity".into(),
+                my => format!("Since {my}").into(),
+            },
+            _ => "Your coding agent activity".into(),
+        };
+
+        let body: AnyElement = match &self.insights {
+            Some(d) if d.sessions > 0 => self.render_insights_content(d, cx),
+            _ if self.insights_loading => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Spinner::new())
+                .into_any_element(),
+            _ => v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(empty_state_card(
+                    "icons/chart-column.svg",
+                    px(58.),
+                    px(24.),
+                    "No activity yet",
+                    "Refresh sessions to see your activity here.",
+                    cx,
+                ))
+                .into_any_element(),
+        };
+
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .bg(theme.background)
+            .child(
+                v_flex()
+                    .id("insights-header")
+                    .w_full()
+                    .h(LIBRARY_IDENTITY_HEIGHT)
+                    .flex_shrink_0()
+                    .window_control_area(WindowControlArea::Drag)
+                    .px(SPACE_XXL)
+                    .justify_center()
+                    .child(
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(FONT_TITLE)
+                                    .font_semibold()
+                                    .child("Insights"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(FONT_LABEL)
+                                    .text_color(theme.muted_foreground)
+                                    .child(subtitle),
+                            ),
+                    ),
+            )
+            .child(body)
+            .into_any_element()
+    }
+
+    fn render_insights_content(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+
+        // ---- 概览大数字行 ----
+        let stat = |value: String, label: &'static str| {
+            v_flex()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(FONT_TITLE)
+                        .font_semibold()
+                        .text_color(theme.foreground)
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .text_size(FONT_CAPTION)
+                        .text_color(theme.muted_foreground)
+                        .child(label),
+                )
+        };
+        // 序:Sessions / Tokens / Prompts / Agents / Projects / Active days
+        // (用户钉的)
+        let overview = h_flex()
+            .gap(px(40.))
+            .child(stat(thousands(d.sessions), "Sessions"))
+            .when(d.tokens > 0, |row| {
+                row.child(stat(fmt_tokens(Some(d.tokens)), "Tokens"))
+            })
+            .child(stat(thousands(d.prompts), "Prompts"))
+            .child(stat(thousands(d.agents.len() as i64), "Agents"))
+            .child(stat(thousands(d.project_count), "Projects"))
+            .child(stat(thousands(d.active_days()), "Active days"));
+
+        // ---- 三个榜单的行首/名称(闭包只捕获 Copy 的色值) ----
+        let dark = theme.mode.is_dark();
+        let muted = theme.muted_foreground;
+        let agent_head = move |u: &UsageTally| match AgentId::from_str(&u.name) {
+            Some(agent) => (
+                Some(img(agent.brand_icon(dark)).size(px(15.)).into_any_element()),
+                agent.display_name().into(),
+            ),
+            // 库里出现未知 agent_id(降级防御):无图标裸名,比整行消失诚实
+            None => (None, u.name.clone().into()),
+        };
+        let project_head = move |u: &UsageTally| {
+            (
+                Some(
+                    icon("icons/folder.svg")
+                        .with_size(px(14.))
+                        .text_color(muted)
+                        .into_any_element(),
+                ),
+                u.name.clone().into(),
+            )
+        };
+        let model_head = |u: &UsageTally| (None, u.name.clone().into());
+
+        div()
+            .id("insights-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .child(
+                div().w_full().flex().justify_center().px(SPACE_XXL).child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(720.))
+                        .pt(SPACE_SM)
+                        .pb(px(40.))
+                        .gap(px(32.))
+                        .child(overview)
+                        .child(
+                            v_flex()
+                                .gap(SPACE_MD)
+                                .child(switch_section_head(
+                                    "Activity",
+                                    Some("Prompts you sent, day by day".into()),
+                                    None,
+                                    cx,
+                                ))
+                                .child(render_heatmap(d, cx)),
+                        )
+                        .child(self.render_distribution_section(d, cx))
+                        .child(self.render_usage_section(
+                            UsageBoard::Agents,
+                            &d.agents,
+                            agent_head,
+                            cx,
+                        ))
+                        .when(!d.projects.is_empty(), |col| {
+                            col.child(self.render_usage_section(
+                                UsageBoard::Projects,
+                                &d.projects,
+                                project_head,
+                                cx,
+                            ))
+                        })
+                        .when(!d.models.is_empty(), |col| {
+                            col.child(self.render_usage_section(
+                                UsageBoard::Models,
+                                &d.models,
+                                model_head,
+                                cx,
+                            ))
+                        }),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// 分布区块:标题右侧 ‹ › 在 hour/weekday/month 三个维度间循环切换
+    fn render_distribution_section(&self, d: &InsightsData, cx: &Context<Self>) -> AnyElement {
+        let range = self.insights_range;
+        let values: &[i64] = match range {
+            InsightsRange::Hour => &d.hourly,
+            InsightsRange::Weekday => &d.weekday,
+            InsightsRange::Month => &d.monthly,
+        };
+        // 峰值只算这一次:caption 点名的与图里高亮的必须是同一根柱
+        let (peak, peak_n) = values
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, n)| **n)
+            .map(|(i, n)| (i, *n))
+            .unwrap_or((0, 0));
+        let arrows = insight_arrows(
+            "dist-arrow",
+            None,
+            cx.listener(move |this, _, _window, cx| {
+                this.insights_range = this.insights_range.prev();
+                cx.notify();
+            }),
+            cx.listener(move |this, _, _window, cx| {
+                this.insights_range = this.insights_range.next();
+                cx.notify();
+            }),
+            cx,
+        );
+        v_flex()
+            .gap(SPACE_MD)
+            .child(switch_section_head(
+                range.title(),
+                Some(dist_caption(range, peak, peak_n).into()),
+                Some(arrows.into_any_element()),
+                cx,
+            ))
+            .child(render_distribution(range, values, peak, cx))
+            .into_any_element()
+    }
+
+    /// 榜单区块(Agents/Projects/Models 同构):‹ 度量名 › 循环切换,行按
+    /// 当前度量降序重排再截断 top-N。可用档位就是一个切片:组内无人报
+    /// token 时 Tokens 不在其中,归一、循环、行过滤都从这一个事实推出
+    fn render_usage_section(
+        &self,
+        board: UsageBoard,
+        rows: &[UsageTally],
+        row_head: impl Fn(&UsageTally) -> (Option<AnyElement>, SharedString),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use InsightsMetric::*;
+        let has_tokens = rows.iter().any(|u| u.tokens > 0);
+        // 循环序与概览行同:Sessions / Tokens / Prompts(用户钉的)
+        let avail: &[InsightsMetric] = if has_tokens {
+            &[Sessions, Tokens, Prompts]
+        } else {
+            &[Sessions, Prompts]
+        };
+        let slot = board as usize;
+        // position 找不到 = 存的档位已不可用(如数据刷新后 token 清零),
+        // 落回首档;循环即可用档位上的环形下标
+        let i = avail
+            .iter()
+            .position(|m| *m == self.insights_metrics[slot])
+            .unwrap_or(0);
+        let metric = avail[i];
+        let to_prev = avail[(i + avail.len() - 1) % avail.len()];
+        let to_next = avail[(i + 1) % avail.len()];
+        let arrows = insight_arrows(
+            board.arrow_id(),
+            Some(metric.caption().into()),
+            cx.listener(move |this, _, _window, cx| {
+                this.insights_metrics[slot] = to_prev;
+                cx.notify();
+            }),
+            cx.listener(move |this, _, _window, cx| {
+                this.insights_metrics[slot] = to_next;
+                cx.notify();
+            }),
+            cx,
+        );
+        let mut sorted: Vec<&UsageTally> = rows
+            .iter()
+            // Tokens 档只列报了用量的组:空条不是"用了 0",是没数据
+            .filter(|u| metric != Tokens || u.tokens > 0)
+            .collect();
+        // stable sort:平局保持 SQL 的 sessions desc + 名称序
+        sorted.sort_by_key(|u| std::cmp::Reverse(metric.value(u)));
+        sorted.truncate(board.limit());
+        let max = sorted.iter().map(|u| metric.value(u)).max().unwrap_or(1);
+        v_flex()
+            .gap(SPACE_MD)
+            .child(switch_section_head(
+                board.title(),
+                None,
+                Some(arrows.into_any_element()),
+                cx,
+            ))
+            .children(sorted.into_iter().map(|u| {
+                let (lead, label) = row_head(u);
+                usage_bar_row(
+                    lead,
+                    label,
+                    metric.display(u).into(),
+                    metric.value(u),
+                    max,
+                    board.name_w(),
+                    cx,
+                )
+            }))
+            .into_any_element()
+    }
+
     fn render_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(detail) = &self.detail else {
@@ -2873,25 +3376,17 @@ impl Workbench {
                 .items_center()
                 .justify_center()
                 .bg(theme.background)
-                .child(
-                    div()
-                        .w(px(360.))
-                        .px(SPACE_XXL)
-                        .py(SPACE_XXL)
-                        .rounded(theme.radius_lg)
-                        .bg(theme.popover)
-                        .child(empty_state(
-                            "icons/message-square.svg",
-                            px(58.),
-                            px(26.),
-                            "No session selected",
-                            format!(
-                                "Pick one from the list, or press {} to search.",
-                                search_key_hint()
-                            ),
-                            cx,
-                        )),
-                )
+                .child(empty_state_card(
+                    "icons/message-square.svg",
+                    px(58.),
+                    px(26.),
+                    "No session selected",
+                    format!(
+                        "Pick one from the list, or press {} to search.",
+                        search_key_hint()
+                    ),
+                    cx,
+                ))
                 .into_any_element();
         };
         let meta = &detail.meta;
@@ -3415,6 +3910,473 @@ enum RowLead {
     Brand(&'static str),
 }
 
+// ---------------- Insights 附件 ----------------
+
+/// 可切换区块共用的 ‹ › ghost 按钮组。label 显示在两键中间(当前档位名),
+/// 定宽居中让按钮位置不随文本长短跳动;分布图的档位名就是区块标题,传 None
+fn insight_arrows(
+    id: &'static str,
+    label: Option<SharedString>,
+    on_prev: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_next: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    h_flex()
+        .flex_shrink_0()
+        .gap(SPACE_XS)
+        .child(
+            Button::new((id, 0usize))
+                .ghost()
+                .rounded(RADIUS_BUTTON)
+                .icon(icon("icons/chevron-left.svg").with_size(px(14.)))
+                .tooltip("Previous view")
+                .on_click(on_prev),
+        )
+        .when_some(label, |row, label| {
+            row.child(
+                div()
+                    .w(px(64.))
+                    .flex()
+                    .justify_center()
+                    .whitespace_nowrap()
+                    .text_size(FONT_CAPTION)
+                    .text_color(theme.muted_foreground)
+                    .child(label),
+            )
+        })
+        .child(
+            Button::new((id, 1usize))
+                .ghost()
+                .rounded(RADIUS_BUTTON)
+                .icon(icon("icons/chevron-right.svg").with_size(px(14.)))
+                .tooltip("Next view")
+                .on_click(on_next),
+        )
+}
+
+/// Insights 区块头:标题 + 可选 caption + 可选右上角切换按钮组。
+/// caption 有则双行(按钮对齐首行),无则单行居中对齐
+fn switch_section_head(
+    title: &'static str,
+    caption: Option<SharedString>,
+    arrows: Option<AnyElement>,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let two_line = caption.is_some();
+    h_flex()
+        .justify_between()
+        .map(|head| {
+            if two_line {
+                head.items_start()
+            } else {
+                head.items_center()
+            }
+        })
+        .child(
+            v_flex()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(FONT_BODY)
+                        .font_semibold()
+                        .text_color(theme.foreground)
+                        .child(title),
+                )
+                .when_some(caption, |head, caption| {
+                    head.child(
+                        div()
+                            .text_size(FONT_CAPTION)
+                            .text_color(theme.muted_foreground)
+                            .child(caption),
+                    )
+                }),
+        )
+        .when_some(arrows, |head, arrows| head.child(arrows))
+}
+
+/// 榜单行:行首 + 名称 + 轨道条 + 计数。value_text 与 count 分开传:
+/// Tokens 档显示 "1.2M" 缩写,条仍按原值归一
+fn usage_bar_row(
+    lead: Option<AnyElement>,
+    label: SharedString,
+    value_text: SharedString,
+    count: i64,
+    max: i64,
+    name_w: Pixels,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let frac = (count as f32 / max.max(1) as f32).clamp(0., 1.);
+    h_flex()
+        .h(px(22.))
+        .gap(SPACE_SM)
+        .items_center()
+        .when_some(lead, |row, lead| {
+            row.child(
+                div()
+                    .w(px(15.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(lead),
+            )
+        })
+        .child(
+            div()
+                .w(name_w)
+                .flex_shrink_0()
+                .min_w_0()
+                .text_size(FONT_CAPTION)
+                .text_color(theme.foreground)
+                .truncate()
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .h(px(6.))
+                .rounded_full()
+                .bg(theme.muted)
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(frac))
+                        .rounded_full()
+                        .bg(theme.primary),
+                ),
+        )
+        .child(
+            div()
+                .w(px(56.))
+                .flex_shrink_0()
+                .flex()
+                .justify_end()
+                .text_size(FONT_LABEL)
+                .text_color(theme.muted_foreground)
+                .child(value_text),
+        )
+}
+
+fn prompts_label(n: i64) -> String {
+    match n {
+        0 => "No prompts".into(),
+        1 => "1 prompt".into(),
+        n => format!("{} prompts", thousands(n)),
+    }
+}
+
+/// 0–23 时 → "12 AM" / "2 PM" 形制(与 smart_time 的 12 小时制一致)
+fn hour_label(h: usize) -> String {
+    match h % 24 {
+        0 => "12 AM".into(),
+        12 => "12 PM".into(),
+        h if h < 12 => format!("{h} AM"),
+        h => format!("{} PM", h - 12),
+    }
+}
+
+const DOW_SHORT: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DOW_PLURAL: [&str; 7] = [
+    "Mondays",
+    "Tuesdays",
+    "Wednesdays",
+    "Thursdays",
+    "Fridays",
+    "Saturdays",
+    "Sundays",
+];
+const MONTH_SHORT: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const MONTH_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// peak 由 render_distribution_section 算一次传入——caption 点名的与
+/// 图里高亮的必须是同一根柱
+fn dist_caption(range: InsightsRange, peak: usize, peak_n: i64) -> String {
+    if peak_n == 0 {
+        return "When you talk to your agents".into();
+    }
+    match range {
+        InsightsRange::Hour => format!("Most active around {}", hour_label(peak)),
+        InsightsRange::Weekday => format!("Most active on {}", DOW_PLURAL[peak]),
+        InsightsRange::Month => format!("Most active in {}", MONTH_FULL[peak]),
+    }
+}
+
+/// 竖柱分布图(hour 24 根 / weekday 7 根 / month 12 根共用)。峰值柱全饱和
+/// primary,其余 55%;零值留 2px muted 底座维持基线连续。宽柱配大缝:
+/// 柱数越少 gap 越大,免得 7 根 90px 宽柱糊成一片
+fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let max = values.iter().copied().max().unwrap_or(0).max(1);
+    let gap = match range {
+        InsightsRange::Hour => px(4.),
+        InsightsRange::Weekday => px(8.),
+        InsightsRange::Month => px(6.),
+    };
+    const CHART_H: f32 = 72.;
+    v_flex()
+        .gap(px(6.))
+        .child(
+            h_flex()
+                .items_end()
+                .gap(gap)
+                .h(px(CHART_H))
+                .children((0..values.len()).map(|i| {
+                    let n = values[i];
+                    let (height, bg) = if n == 0 {
+                        (px(2.), theme.muted)
+                    } else {
+                        let frac = (n as f32 / max as f32).max(0.05);
+                        (
+                            px((frac * CHART_H).max(3.)),
+                            if i == peak {
+                                theme.primary
+                            } else {
+                                theme.primary.opacity(0.55)
+                            },
+                        )
+                    };
+                    let label: SharedString = match range {
+                        InsightsRange::Hour => format!(
+                            "{} · {} – {}",
+                            prompts_label(n),
+                            hour_label(i),
+                            hour_label(i + 1)
+                        ),
+                        InsightsRange::Weekday => {
+                            format!("{} · {}", prompts_label(n), DOW_PLURAL[i])
+                        }
+                        InsightsRange::Month => {
+                            format!("{} · {}", prompts_label(n), MONTH_FULL[i])
+                        }
+                    }
+                    .into();
+                    div()
+                        .id(("dist", i))
+                        .flex_1()
+                        .h(height)
+                        .rounded(px(2.))
+                        .bg(bg)
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                        })
+                })),
+        )
+        .child(
+            // 刻度行:与柱同宽的等分槽。hour 只标 6 小时锚点(文字溢出槽宽
+            // 不裁剪),weekday/month 每柱都标
+            h_flex()
+                .gap(gap)
+                .text_size(FONT_LABEL)
+                .text_color(theme.muted_foreground)
+                .children((0..values.len()).map(|i| {
+                    let tick: Option<&'static str> = match range {
+                        InsightsRange::Hour => None,
+                        InsightsRange::Weekday => Some(DOW_SHORT[i]),
+                        InsightsRange::Month => Some(MONTH_SHORT[i]),
+                    };
+                    div().flex_1().whitespace_nowrap().map(|slot| match tick {
+                        // 每柱都有标签时与柱居中;hour 的稀疏锚点靠左
+                        Some(t) => slot.flex().justify_center().child(t),
+                        None if i % 6 == 0 => slot.child(hour_label(i)),
+                        None => slot,
+                    })
+                })),
+        )
+        .into_any_element()
+}
+
+/// 热力图强度阶梯(primary 不透明度四档)。图例与格子同引本表,
+/// 调阶只改这里
+const HEAT: [f32; 4] = [0.25, 0.5, 0.75, 1.];
+
+/// GitHub 风活跃热力图:53 周 × 7 天(周一起始),最右列为本周(d.as_of,
+/// 与 streak 同一天,渲染层不再读时钟)。格子 9px:网格总宽 26 + 3 +
+/// 53×9 + 52×3 = 662,必须收进最小窗口的内容宽 668(940 − 224 侧栏 −
+/// 两侧 24 padding)——10px 格的 715 会在最小窗口被裁掉右缘
+/// (2026-08-27 Codex review)。daily 升序,二分出窗口后填定长数组——
+/// 渲染路径零哈希零日期运算;tooltip 文案 hover 才格式化
+fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
+    use chrono::Datelike as _;
+    let theme = cx.theme();
+    let today = d.as_of;
+    let this_monday = today - chrono::Days::new(today.weekday().num_days_from_monday() as u64);
+    let start = this_monday - chrono::Days::new(52 * 7);
+    let today_ix = (today - start).num_days();
+
+    const DAYS: usize = 53 * 7;
+    let mut window = [0i64; DAYS];
+    let mut heat_max = 1i64;
+    let from = d.daily.partition_point(|(day, _)| *day < start);
+    for &(day, n) in &d.daily[from..] {
+        let ix = (day - start).num_days();
+        if (0..DAYS as i64).contains(&ix) {
+            window[ix as usize] = n;
+            heat_max = heat_max.max(n);
+        }
+    }
+    let heat_color = |n: i64| -> Hsla {
+        if n == 0 {
+            return theme.muted;
+        }
+        let quartile = ((n as f32 / heat_max as f32) * 4.).ceil().clamp(1., 4.) as usize;
+        theme.primary.opacity(HEAT[quartile - 1])
+    };
+    const CELL: f32 = 9.;
+    const GAP: f32 = 3.;
+    const STEP: f32 = CELL + GAP;
+    const DOW_W: f32 = 26.;
+
+    // 月份标签:该列周一进入新月份时标注(与前一周比,首列同规则,
+    // 相邻标签由此天然隔开 ≥4 列不会叠)
+    let mut months = div()
+        .relative()
+        .w_full()
+        .h(px(14.))
+        .text_size(FONT_LABEL)
+        .text_color(theme.muted_foreground);
+    for c in 0..53u64 {
+        let monday = start + chrono::Days::new(c * 7);
+        if monday.month() != (monday - chrono::Days::new(7)).month() {
+            months = months.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(DOW_W + GAP + c as f32 * STEP))
+                    .child(MONTH_SHORT[monday.month0() as usize]),
+            );
+        }
+    }
+
+    // 星期标签列:行 r 的格子 y = r×STEP,文字行高 ≈13px,
+    // (CELL−13)/2 = −2 光学对行
+    let dow_col = div()
+        .relative()
+        .w(px(DOW_W))
+        .h(px(7. * STEP - GAP))
+        .flex_shrink_0()
+        .text_size(FONT_LABEL)
+        .text_color(theme.muted_foreground)
+        .children([0usize, 2, 4].map(|r| {
+            div()
+                .absolute()
+                .top(px(r as f32 * STEP - 2.))
+                .left_0()
+                .child(DOW_SHORT[r])
+        }));
+
+    let mut grid = h_flex().gap(px(GAP)).items_start().child(dow_col);
+    for c in 0..53usize {
+        let mut col = v_flex().gap(px(GAP));
+        for r in 0..7usize {
+            let ix = c * 7 + r;
+            if ix as i64 > today_ix {
+                col = col.child(div().size(px(CELL)));
+                continue;
+            }
+            let n = window[ix];
+            col = col.child(
+                div()
+                    .id(("hm", ix))
+                    .size(px(CELL))
+                    .rounded(px(2.))
+                    .bg(heat_color(n))
+                    // 只捕获 Copy 的 (start, ix, n),hover 到的那格才格式化
+                    .tooltip(move |window, cx| {
+                        let day = start + chrono::Days::new(ix as u64);
+                        let label = format!("{} · {}", prompts_label(n), day.format("%b %-d, %Y"));
+                        gpui_component::tooltip::Tooltip::new(SharedString::from(label))
+                            .build(window, cx)
+                    }),
+            );
+        }
+        grid = grid.child(col);
+    }
+
+    // 底注:streak/最忙一天(左) + Less…More 图例(右)
+    let mut notes: Vec<String> = Vec::new();
+    if d.current_streak > 0 {
+        notes.push(format!("{}-day streak", d.current_streak));
+    }
+    if d.longest_streak > 0 {
+        notes.push(format!("Longest {} days", d.longest_streak));
+    }
+    if let Some((day, n)) = d.busiest_day() {
+        notes.push(format!(
+            "Busiest {} ({})",
+            day.format("%b %-d"),
+            prompts_label(n)
+        ));
+    }
+    let legend = h_flex()
+        .justify_between()
+        .items_center()
+        .text_size(FONT_LABEL)
+        .text_color(theme.muted_foreground)
+        .child(div().min_w_0().truncate().child(notes.join(" · ")))
+        .child(
+            h_flex()
+                .gap(px(GAP))
+                .items_center()
+                .flex_shrink_0()
+                .child("Less")
+                .children(std::iter::once(0.).chain(HEAT).map(|a: f32| {
+                    div().size(px(CELL)).rounded(px(2.)).bg(if a == 0. {
+                        theme.muted
+                    } else {
+                        theme.primary.opacity(a)
+                    })
+                }))
+                .child("More"),
+        );
+
+    v_flex()
+        .gap(px(6.))
+        .child(months)
+        .child(grid)
+        .child(div().pt(SPACE_XS).child(legend))
+        .into_any_element()
+}
+
+/// 阅读材质空态卡(360px `popover` 圆角面):详情空态与 Insights 空态共用,
+/// 形制齐步走
+fn empty_state_card(
+    icon_path: &'static str,
+    circle: Pixels,
+    icon_size: Pixels,
+    title: impl Into<SharedString>,
+    caption: impl Into<SharedString>,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    div()
+        .w(px(360.))
+        .px(SPACE_XXL)
+        .py(SPACE_XXL)
+        .rounded(theme.radius_lg)
+        .bg(theme.popover)
+        .child(empty_state(
+            icon_path, circle, icon_size, title, caption, cx,
+        ))
+}
+
 /// 空态占位(⌘K 初始 / 列表空 / 详情未选中共用):muted 圆底图标 + 标题 + 说明。
 /// 圆径/图标径按场景传入,字阶与间距固定,保证三处视觉一致。
 fn empty_state(
@@ -3810,8 +4772,15 @@ impl Render for Workbench {
                 h_flex()
                     .size_full()
                     .child(self.render_sidebar(window, cx))
-                    .child(self.render_session_list(cx))
-                    .child(self.render_detail(window, cx)),
+                    // Insights 是整页目的地:替换中栏+右栏,侧栏导航保持在场
+                    .map(|this| {
+                        if self.insights_open {
+                            this.child(self.render_insights(cx))
+                        } else {
+                            this.child(self.render_session_list(cx))
+                                .child(self.render_detail(window, cx))
+                        }
+                    }),
             )
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))

@@ -92,6 +92,7 @@ icons!(
     "refresh-cw",
     "inbox",
     "chevron-down",
+    "chevron-left",
     "chevron-right",
     "loader-circle",
     "loader",
@@ -103,6 +104,7 @@ icons!(
     "settings",
     "plus",
     "info",
+    "chart-column",
 );
 
 impl AssetSource for Assets {

@@ -141,6 +141,9 @@ pub fn open_or_rebuild(path: &Path) -> Result<(Store, Option<String>)> {
 pub struct Store {
     write: Mutex<Connection>,
     read: Mutex<Connection>,
+    /// insights() 开临时连接用:统计要连扫 messages 几十毫秒,共用唯一
+    /// 读连接会让 UI 线程的列表查询排队等它(2026-08-27 Codex review)
+    path: std::path::PathBuf,
 }
 
 impl Store {
@@ -148,6 +151,7 @@ impl Store {
         Ok(Self {
             write: Mutex::new(open_conn(path)?),
             read: Mutex::new(open_conn(path)?),
+            path: path.to_path_buf(),
         })
     }
 
@@ -721,6 +725,165 @@ impl Store {
         Ok(counts)
     }
 
+    /// Insights 页统计快照。`today` 由调用方传入(streak 相对它计算,
+    /// 也让测试不依赖真实时钟);SQL 侧 `'localtime'` 与 chrono `Local`
+    /// 同取系统时区,日界一致。messages 全表恰扫两遍(日×时分桶 + 榜单
+    /// prompts),量级几十万行、几十毫秒——调用方走后台任务,别在 UI
+    /// 线程等它。
+    pub fn insights(&self, today: chrono::NaiveDate) -> Result<InsightsData> {
+        use chrono::Datelike as _;
+        // "一条 prompt" 的行集(主线用户消息)——整页口径共用这一个片段,
+        // 内联多份的话谓词一漂移,总数就会与分桶/榜单悄悄不一致
+        const PROMPT_ROWS: &str = "FROM messages m JOIN sessions s ON s.key = m.session_key
+             WHERE s.archived = 0 AND m.role = 'user' AND m.sidechain_id IS NULL";
+
+        // 临时连接,不与 UI 的 read 连接抢锁:WAL 多读并发,几十毫秒的
+        // 统计扫描不该让导航点击的列表查询排队(2026-08-27 Codex review)
+        let conn = open_conn(&self.path)?;
+        let mut data = InsightsData {
+            as_of: today,
+            ..Default::default()
+        };
+
+        (
+            data.sessions,
+            data.tokens,
+            data.first_ts,
+            data.project_count,
+        ) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(tokens_used),0),
+                    COALESCE(MIN(NULLIF(created_at,0)),0),
+                    COUNT(DISTINCT NULLIF(project_path,''))
+             FROM sessions WHERE archived = 0",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+
+        // 第一遍:按(日,时)组合分桶(行数 = 活跃日×活跃时段,千级)。
+        // 无 ts 的行落 NULL 桶只计入总数;weekday/monthly 由日期在 Rust 侧
+        // 派生,省去再让 SQL 各扫一遍 + 每行多次 strftime 时区换算
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT CASE WHEN m.ts > 0 THEN date(m.ts/1000,'unixepoch','localtime') END d,
+                    CASE WHEN m.ts > 0 THEN CAST(strftime('%H', m.ts/1000,'unixepoch','localtime') AS INTEGER) END h,
+                    COUNT(*)
+             {PROMPT_ROWS}
+             GROUP BY d, h ORDER BY d"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (d, h, n) = row?;
+            data.prompts += n;
+            let Some(d) = d else { continue };
+            let Ok(day) = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d") else {
+                continue;
+            };
+            // 时钟漂移的脏数据可能带未来日期:不进任何分桶(prompts 总数
+            // 无日期语义仍计入)。热力图不画未来格,streak/活跃天数若认了
+            // 就会与它互相矛盾(2026-08-27 Codex review)
+            if day > today {
+                continue;
+            }
+            if let Some(h) = h.filter(|h| (0..24).contains(h)) {
+                data.hourly[h as usize] += n;
+            }
+            data.weekday[day.weekday().num_days_from_monday() as usize] += n;
+            data.monthly[day.month0() as usize] += n;
+            // ORDER BY d 保证同日相邻,尾项聚合即可
+            match data.daily.last_mut() {
+                Some((last, c)) if *last == day => *c += n,
+                _ => data.daily.push((day, n)),
+            }
+        }
+        drop(stmt);
+
+        // 第二遍:榜单 prompts 按(agent,项目,模型)三键一次分组(行数 =
+        // distinct 组合,几百),拆三张 map 回填——免去每个榜单一遍全表子查询
+        let mut prompts_by_agent: HashMap<String, i64> = HashMap::new();
+        let mut prompts_by_project: HashMap<String, i64> = HashMap::new();
+        let mut prompts_by_model: HashMap<String, i64> = HashMap::new();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT s.agent_id, s.project_path, COALESCE(s.model,''), COUNT(*)
+             {PROMPT_ROWS}
+             GROUP BY 1, 2, 3"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (agent, project, model, n) = row?;
+            *prompts_by_agent.entry(agent).or_default() += n;
+            *prompts_by_project.entry(project).or_default() += n;
+            if !model.is_empty() {
+                *prompts_by_model.entry(model).or_default() += n;
+            }
+        }
+        drop(stmt);
+
+        // 榜单主体只查 sessions 表(几百行),prompts 由上面的 map 回填。
+        // display 与 group 分开传:项目按 path 分组、按名展示(同名异路径
+        // 各占一行,合并会把两个真实目录混作一处)。全量返回不截断——
+        // top-N 由 UI 按当前度量排序后取,否则换度量会漏项
+        let usage = |display: &str,
+                     group: &str,
+                     filter: &str,
+                     prompts: &HashMap<String, i64>|
+         -> Result<Vec<UsageTally>> {
+            let sql = format!(
+                "SELECT {display}, {group}, COUNT(*), COALESCE(SUM(s.tokens_used),0)
+                 FROM sessions s WHERE s.archived = 0{filter}
+                 GROUP BY {group} ORDER BY COUNT(*) DESC, {display}"
+            );
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    UsageTally {
+                        name: r.get(0)?,
+                        sessions: r.get(2)?,
+                        tokens: r.get(3)?,
+                        prompts: 0,
+                    },
+                    r.get::<_, String>(1)?,
+                ))
+            })?;
+            rows.map(|row| {
+                let (mut tally, key) = row?;
+                tally.prompts = prompts.get(&key).copied().unwrap_or(0);
+                Ok(tally)
+            })
+            .collect()
+        };
+        data.agents = usage("s.agent_id", "s.agent_id", "", &prompts_by_agent)?;
+        // 无 cwd 的会话 project_path 为空、name 是 "Unknown project" 占位:
+        // 概览 project_count 按空 path 排除,榜单必须同谓词——按 name 滤会
+        // 让页面一边数 0 一边列出 Unknown project(2026-08-27 Codex review)
+        data.projects = usage(
+            "s.project_name",
+            "s.project_path",
+            " AND s.project_path != ''",
+            &prompts_by_project,
+        )?;
+        data.models = usage(
+            "s.model",
+            "s.model",
+            " AND s.model IS NOT NULL AND s.model != ''",
+            &prompts_by_model,
+        )?;
+
+        (data.current_streak, data.longest_streak) = compute_streaks(&data.daily, today);
+        Ok(data)
+    }
+
     /// 全文搜索:trigram MATCH(每段 ≥3 码点)或 LIKE 降级。返回 (hits, degraded)
     pub fn search(
         &self,
@@ -1000,6 +1163,28 @@ fn make_like_snippet(text: &str, first_seg: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// (current, longest) 连续活跃天数。`daily` 须按日期升序(insights 的
+/// SQL 保证)。current 从 today 往回数;今天尚无活动时允许从昨天起算
+/// (GitHub 惯例:一天没结束不清零),更早断档即为 0。
+fn compute_streaks(daily: &[(chrono::NaiveDate, i64)], today: chrono::NaiveDate) -> (i64, i64) {
+    let mut longest = 0i64;
+    let mut run = 0i64;
+    let mut prev: Option<chrono::NaiveDate> = None;
+    for &(d, _) in daily {
+        run = match prev {
+            Some(p) if (d - p).num_days() == 1 => run + 1,
+            _ => 1,
+        };
+        longest = longest.max(run);
+        prev = Some(d);
+    }
+    let current = match prev {
+        Some(last) if (today - last).num_days() <= 1 => run,
+        _ => 0,
+    };
+    (current, longest)
 }
 
 pub fn now_ms() -> i64 {

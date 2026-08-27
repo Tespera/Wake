@@ -42,6 +42,36 @@ pub fn abs_date(ts: i64) -> String {
         .unwrap_or_default()
 }
 
+/// epoch ms → "Mar 2026"(Insights 副标题);无效或 ≤0 给空串。
+/// ts→字符串一律住本模块,渲染层不直接碰 chrono
+pub fn month_year(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .map(|dt| dt.format("%b %Y").to_string())
+        .unwrap_or_default()
+}
+
+/// 千分位分组(Insights 大数字用):1234567 → "1,234,567"
+pub fn thousands(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
 pub fn fmt_tokens(n: Option<i64>) -> String {
     match n {
         None | Some(0) => String::new(),

@@ -387,3 +387,151 @@ fn guarded_write_respects_winner() {
         "/backup/g.jsonl"
     );
 }
+
+/// Insights 统计口径:archived=0、prompts 只数主线 user、daily/hourly 按
+/// 本地时区分桶(SQL 'localtime' 与 chrono Local 必须同界)、streak 允许
+/// 今天尚无活动时从昨天起算。日期全固定,不依赖真实时钟。
+#[test]
+fn insights_snapshot_and_streaks() {
+    use chrono::TimeZone;
+    let (_dir, store) = temp_store();
+    let ts = |d: u32, h: u32| {
+        chrono::Local
+            .with_ymd_and_hms(2026, 1, d, h, 30, 0)
+            .single()
+            .expect("unambiguous local time")
+            .timestamp_millis()
+    };
+    let at = |seq: i64, role: Role, t: Option<i64>| IndexUnit {
+        seq,
+        sidechain_id: None,
+        role,
+        timestamp: t,
+        text: format!("msg {seq}"),
+    };
+
+    // s1(claude-code):10/11/12 三连活跃日;含 assistant、sidechain、无 ts 行
+    let mut m1 = meta("claude-code:i1", "insights 甲");
+    m1.model = Some("claude-opus".into());
+    let mut units = vec![
+        at(0, Role::User, Some(ts(10, 9))),
+        at(1, Role::Assistant, Some(ts(10, 9))),
+        at(2, Role::User, Some(ts(11, 14))),
+        at(3, Role::User, Some(ts(11, 14))),
+        at(4, Role::User, Some(ts(12, 22))),
+        at(5, Role::User, None), // 无 ts:计入 prompts,不进 daily/hourly
+    ];
+    units.push(IndexUnit {
+        seq: 6,
+        sidechain_id: Some("side".into()),
+        role: Role::User,
+        timestamp: Some(ts(12, 22)),
+        text: "子代理里的 user 不算 prompt".into(),
+    });
+    store.write_session(&m1, m1.updated_at, &units).unwrap();
+
+    // s2(codex):1/7 孤立活跃日 + 1/11;带 tokens。另有一条 2/5 的
+    // "未来"消息(相对 today=1/13,模拟时钟漂移脏数据):prompts 总数计入,
+    // 分桶/streak/活跃天数全不认——与热力图不画未来格同口径
+    let mut m2 = meta("codex:i2", "insights 乙");
+    m2.agent = AgentId::Codex;
+    m2.file_path = "/tmp/fixtures/i2.jsonl".into();
+    m2.model = Some("gpt-5-codex".into());
+    m2.tokens_used = Some(500);
+    let future = chrono::Local
+        .with_ymd_and_hms(2026, 2, 5, 9, 30, 0)
+        .single()
+        .expect("unambiguous local time")
+        .timestamp_millis();
+    store
+        .write_session(
+            &m2,
+            m2.updated_at,
+            &[
+                at(0, Role::User, Some(ts(7, 9))),
+                at(1, Role::User, Some(ts(11, 14))),
+                at(2, Role::User, Some(future)),
+            ],
+        )
+        .unwrap();
+
+    // s3:archived,任何统计都不该出现
+    let mut m3 = meta("codex:i3", "已归档");
+    m3.agent = AgentId::Codex;
+    m3.file_path = "/tmp/fixtures/i3.jsonl".into();
+    m3.archived = true;
+    store
+        .write_session(&m3, m3.updated_at, &[at(0, Role::User, Some(ts(1, 9)))])
+        .unwrap();
+
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 1, 13).unwrap();
+    let d = store.insights(today).unwrap();
+
+    assert_eq!(d.as_of, today);
+    assert_eq!(d.sessions, 2);
+    assert_eq!(d.prompts, 8, "主线 user:s1 五条(含无 ts)+ s2 三条(含未来)");
+    assert_eq!(d.tokens, 500);
+    assert_eq!(d.project_count, 1);
+    assert_eq!(d.active_days(), 4, "未来日不算活跃天");
+    assert_eq!(
+        d.busiest_day(),
+        Some((chrono::NaiveDate::from_ymd_opt(2026, 1, 11).unwrap(), 3))
+    );
+    assert_eq!((d.current_streak, d.longest_streak), (3, 3));
+    assert_eq!(d.hourly[9], 2);
+    assert_eq!(d.hourly[14], 3);
+    assert_eq!(d.hourly[22], 1);
+    assert_eq!(d.hourly.iter().sum::<i64>(), 6, "无 ts 与未来行不进 hourly");
+    // 2026-01-07 周三、01-10 周六、01-11 周日×3、01-12 周一(周一起始序)
+    assert_eq!(d.weekday, [1, 0, 1, 0, 0, 1, 3]);
+    assert_eq!(d.monthly[0], 6, "全部落在一月");
+    assert_eq!(d.monthly.iter().sum::<i64>(), 6);
+    assert_eq!(
+        d.agents,
+        vec![
+            UsageTally {
+                name: "claude-code".into(),
+                sessions: 1,
+                prompts: 5, // 四条有 ts + 一条无 ts;sidechain 不算
+                tokens: 0,
+            },
+            UsageTally {
+                name: "codex".into(),
+                sessions: 1,
+                prompts: 3, // 榜单 prompts 无日期语义,未来行也计
+                tokens: 500,
+            },
+        ]
+    );
+    assert_eq!(
+        d.projects,
+        vec![UsageTally {
+            name: "proj".into(),
+            sessions: 2,
+            prompts: 8, // 两家主线 user 之和(含无 ts 与未来行)
+            tokens: 500,
+        }]
+    );
+    assert_eq!(
+        d.models,
+        vec![
+            UsageTally {
+                name: "claude-opus".into(),
+                sessions: 1,
+                prompts: 5,
+                tokens: 0,
+            },
+            UsageTally {
+                name: "gpt-5-codex".into(),
+                sessions: 1,
+                prompts: 3,
+                tokens: 500,
+            },
+        ]
+    );
+
+    // 断档超过一天 → current 归零,longest 保留
+    let far = chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+    let d = store.insights(far).unwrap();
+    assert_eq!((d.current_streak, d.longest_streak), (0, 3));
+}

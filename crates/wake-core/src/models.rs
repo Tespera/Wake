@@ -350,6 +350,62 @@ pub struct SearchHit {
     pub timestamp: Option<i64>,
 }
 
+/// Insights 页统计快照(`Store::insights` 一次算好)。口径与主 UI 一致:
+/// 全部 `archived = 0`;"prompts" = 主线用户消息(role=user 且非 sidechain)。
+/// daily 是**全时段**活跃日谱(仅含有时间戳的行,升序)——热力图窗口、
+/// streak、busiest day 都由它派生,不另设第二份日数据。
+#[derive(Debug, Clone, Default)]
+pub struct InsightsData {
+    /// 快照的"今天"(查询时传入的本地日):streak 与热力图末列共用它,
+    /// 渲染层不再各自读时钟——跨午夜也不会互相错位
+    pub as_of: chrono::NaiveDate,
+    pub sessions: i64,
+    pub prompts: i64,
+    /// SUM(tokens_used);多数 adapter 无 token 数据,0 = 不展示
+    pub tokens: i64,
+    pub project_count: i64,
+    /// 最早会话 created_at(ms);0 = 库内无有效时间
+    pub first_ts: i64,
+    /// 截至 as_of 的连续活跃天数(今天尚无活动时从昨天起算,GitHub 惯例)
+    pub current_streak: i64,
+    pub longest_streak: i64,
+    pub daily: Vec<(chrono::NaiveDate, i64)>,
+    /// 本地时段分布(0–23 时)
+    pub hourly: [i64; 24],
+    /// 星期分布,周一起始(与热力图同序)
+    pub weekday: [i64; 7],
+    /// 月份分布(1–12 月聚合到 12 桶,跨年叠加)
+    pub monthly: [i64; 12],
+    /// 每家 agent 的三个度量,按会话数降序;UI 切换度量时自行重排
+    pub agents: Vec<UsageTally>,
+    /// 全量项目——不截断,top-N 由 UI 按当前度量排序后取(SQL 里加 LIMIT
+    /// 会让 Prompts/Tokens 榜漏掉会话数排不进前列的项)
+    pub projects: Vec<UsageTally>,
+    /// 全量模型,同上
+    pub models: Vec<UsageTally>,
+}
+
+impl InsightsData {
+    /// 活跃天数 = daily 长度(派生不另存,免第二个写入点失步)
+    pub fn active_days(&self) -> i64 {
+        self.daily.len() as i64
+    }
+
+    pub fn busiest_day(&self) -> Option<(chrono::NaiveDate, i64)> {
+        self.daily.iter().max_by_key(|(_, n)| *n).copied()
+    }
+}
+
+/// Insights 榜单的一行(agent/项目/模型共用)。tokens = 0 表示该组不报
+/// token(而非用了 0),UI 按此语义隐藏而不是画空条
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UsageTally {
+    pub name: String,
+    pub sessions: i64,
+    pub prompts: i64,
+    pub tokens: i64,
+}
+
 /// 搜索 snippet 高亮哨兵(UI 层替换为高亮样式)
 pub const HL_OPEN: char = '\u{e000}';
 pub const HL_CLOSE: char = '\u{e001}';

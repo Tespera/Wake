@@ -133,7 +133,7 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 - 线条图标比实心品牌图视觉轻,同档里给小一号:分组项 Lucide 14 / 品牌图 18,主导航 Lucide 15。
 - 行内容 = 行首元素 + 标题 + 计数;计数一律 Label 档 muted。
 - 组头 "Agents"/"Projects" 用 Body 档常规字重 + muted 色(与主导航同字号同字重,仅靠颜色和"无行首图标"区分——加粗会让组头压过它统辖的行),带 13px chevron 可折叠。
-- 底部工具条常驻,总高 44px（含顶部 1px hairline）,按钮靠右排列(次要操作区:透明底、hover 才出色,不与导航行选中态抢注意力)——左为齿轮 "Settings",右为 refresh。Settings 同时进入 Wake 菜单并绑定 `⌘,`(其他平台 `Ctrl+,`),保持单例窗口。
+- 底部工具条常驻,总高 44px（含顶部 1px hairline）,按钮靠右排列(次要操作区:透明底、hover 才出色,不与导航行选中态抢注意力)——依次为 chart-column "Insights"、齿轮 "Settings"、refresh。Insights 页打开时其图标以 primary 点亮,是工具条里唯一有激活态的按钮。Settings 同时进入 Wake 菜单并绑定 `⌘,`(其他平台 `Ctrl+,`),保持单例窗口。
 - Settings 默认 820×600，采用 180px 窄侧栏 + 内容页结构，固定为 General / Locations / Data / Updates / About 五项；About 与功能设置分离并钉在侧栏底部，Wake 菜单的 About Wake 直达同一页。About 沿用 Kooky/Birth 的信息顺序：产品图标、名称、版本、tagline、GitHub、短分隔线、版权/许可证与作者署名。Updates 是独立功能页,仅在用户点击页面按钮或 macOS Wake 菜单的 Check for Updates 时读取 GitHub 最新正式 Release 元数据,明确呈现检查中/最新版/有新版/失败四种状态;有新版时打开 Release 页供用户下载,不后台检查、不自行覆盖应用包。内部常规文字按钮统一沿用主界面的 24px 高、6px 圆角和主题交互色,普通页面动作使用 muted 填充 + hairline；发现新版后的 View Update 是需要用户继续完成的主操作,使用 32px 高 primary 填充和轻阴影。Appearance 分段选择器也使用同一材质。General 只放真实可用的全局偏好,当前为持久化的 System / Light / Dark 外观选择;不提供默认 “Open In” 终端。Data 只展示 Wake 本地存储位置、会话数与磁盘占用并提供文件管理器入口,不重复放刷新或清库动作；常规 Refresh 的唯一入口仍是主侧栏底部。Locations 页按 AgentId 声明序以 agent 分组,品牌名只在组头出现一次;本机有数据的组优先,未检测到的 agent 默认收进可展开区。每条路径以路径为主信息、会话数/不可用状态为 muted 副信息,最右为逐路径开关;停用时只降低文字层级，开关与菜单保持完整对比度。行本身不承担编辑,`…` 菜单集中 Edit / Show in Finder / 自定义 Remove。顶部操作为低强调的 Add location,Restore defaults 收进页级 `…` 菜单且无偏离时禁用。添加/编辑仍复用 agent 下拉 + 可手输路径 + 目录选择表单;关闭 location 后保留配置、停止扫描/监听并从会话与搜索结果排除,重新开启即增量扫回;纯路径管理不做内容校验。
 - 工具条内的**状态行"常态沉默"**:仅刷新中或监听不可用时出现在按钮行上方;文案须可 truncate,窄侧栏放不下长句(故为 "Live updates off" 而非带操作建议的整句)。
 - 手动 Refresh 始终后台运行；进度复用侧栏状态行，完成后发通知，不用模态框阻断浏览、搜索或阅读。
@@ -195,6 +195,18 @@ emoji 不再承担界面或正文结构图标职责。
 - 结果行使用品牌图标、标题、项目与时间、单行片段。
 - 搜索始终覆盖全部会话；页脚左侧显示“搜索范围：全部会话”，右侧显示 `↑↓`、`↩`、`esc` 键盘路径。
 - 指针回调中不得同步派发新的键盘事件。需要关闭旧浮层或转移输入焦点时，应通过对应组件 API 或延迟到下一事件周期处理，避免在 AppKit `mouseUp` 路径里重入 GPUI 事件分发；打开搜索面板前必须让 Root 先保存原焦点，关闭后 `⌘K` 才能继续生效。
+
+### Insights
+
+侧栏底部工具条的 chart-column 按钮进入;它是与全部导航行互斥的**整页目的地**——打开时替换会话流与阅读区,点任意导航行(或再点入口)退出并落回 All Sessions。设置仍是独立场景,Insights 不是。
+
+- 页面用 `background` 材质整片承载;顶部 88px 标题区与中栏同节奏(Insights 22px semibold + Label 11 副行,副行只说 "Since {首会话月份}"),兼窗口拖拽区。内容限 720px 阅读宽居中,区块之间只用 32px 留白与 Body 14 semibold 组头分隔——**不做卡片墙、零投影**,延续"避免每个区域加边框"的层级原则。
+- 统计口径与主 UI 一致(archived 不计):"Prompts" 一律指主线用户消息。数据在打开与每次 Refresh 后后台重算,不阻塞浏览。
+- 概览行:22px semibold 大数字 + Caption 标签,序为 Sessions / Tokens / Prompts / Agents / Projects / Active days(用户钉序,2026-08-27);Tokens 仅在有 agent 报过用量时出现。数字千分位。
+- 活跃热力图:53 周 × 7 天(周一起始,最右列为本周),10px 圆角格 + 3px 缝,总宽 715px。强度 = `muted` 空格 + `primary` 25/50/75/100% 四档(按窗口内峰值分位);未来日期留白。月份与 Mon/Wed/Fri 标签用 Label 11 muted;每格 tooltip 给 "N prompts · Aug 3, 2026"。底注左侧为 streak 与最忙一日(Label 11,` · ` 分隔),右侧 Less–More 固定满阶梯图例。
+- 分布图:hour(24 柱)/ weekday(7 柱)/ month(12 柱)三个维度共用一张竖柱图,组头右侧 ‹ › ghost 按钮循环切换(纯视图状态,数据三份常驻不重查);峰值柱全饱和 `primary`、其余 55%,零值保留 2px `muted` 基线;柱数越少缝越大(4/8/6px)。hour 只标 6 小时锚点(靠左),weekday/month 每柱标签与柱居中;组头副行点出峰值("Most active around 2 PM" / "on Sundays" / "in August")。
+- Agents / Projects / Models 三个榜单同构:条形行 = 行首(品牌图 15px 原色 / folder 图标 / 无)+ 名称列定宽 truncate + 6px 圆头轨道条(`muted` 轨、`primary` 填充,按组内峰值归一)+ 右对齐 Label 计数。三个组头都挂 ‹ › 切换度量,循环序与概览行一致:Sessions / Tokens / Prompts;**当前档位名(首字母大写的裸名词)显示在两键中间**——64px 定宽居中,Caption muted,按钮位置不随文本跳动;榜单组头因此为单行(标题与按钮组居中对齐),分布图组头保留 caption 双行、按钮中间无标签(其标题本身就是档位名)。每个榜单各自记忆档位,行按当前度量降序重排后取 top-N(Agents 全量、Projects/Models 各 6;截断在排序之后,换度量不漏项);Tokens 档只列报过用量的组、值用 K/M 缩写,组内无人报 token 时该档不进循环。
+- 空态沿用详情空态形制("No activity yet" + "Refresh sessions to see your activity here.");加载用居中 Spinner,已有数据时静默换新不闪烁。
 
 ## 图标、形状与层次
 
