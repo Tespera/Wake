@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [0.3.0] — 2026-08-27
+
+- New: Insights page — a new sidebar entry showing your coding agent activity at a glance: sessions, tokens, prompts, agents, projects, and active days
+- New: a GitHub-style heatmap charts your prompts day by day across the past year, with your current streak, longest streak, and busiest day
+- New: activity breakdowns by hour, weekday, or month — flip between views with the arrows
+- New: Agents, Projects, and Models leaderboards, each switchable between sessions, tokens, and prompts
+
 ## [0.2.11] — 2026-08-26
 
 - Update: Update UI
