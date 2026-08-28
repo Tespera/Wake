@@ -17,14 +17,66 @@ pub const FONT_CAPTION: Pixels = px(12.);
 /// 标签(分组头/计数/快捷键徽标/状态栏);组头 semibold + 大写
 pub const FONT_LABEL: Pixels = px(11.);
 
-// ---- 对话区附档(详情逐消息渲染,经用户逐轮校准,与六档并存)----
+// ---- 对话区附档(详情逐消息渲染,与六档并存)----
+// 字号 / 行宽 / 行高是一组,必须一起改:14.5px × 612px ≈ 42 个中文字/行。
+// 只动字号会让每行字数漂,列宽要按同一比例跟着走。
 
-/// 用户气泡正文(比 FONT_BODY 收半档,气泡内更紧凑)
-pub const FONT_MSG_USER: Pixels = px(13.5);
+/// 用户气泡正文(比助手正文收半档:气泡有底色,同字号会显得更重)
+pub const FONT_MSG_USER: Pixels = px(14.);
 /// 助手平铺正文
-pub const FONT_MSG_BODY: Pixels = px(13.);
-/// thinking 摘要行(斜体)
-pub const FONT_MSG_THINKING: Pixels = px(11.5);
+pub const FONT_MSG_BODY: Pixels = px(14.5);
+/// thinking / 工具卡的头行与折叠内容
+pub const FONT_MSG_THINKING: Pixels = px(12.5);
+/// 工具卡里的等宽参数与输出
+pub const FONT_MSG_MONO: Pixels = px(11.75);
+
+/// 助手正文行高。中文长文的舒适区间 1.85–2.0——汉字没有 x-height 起伏,
+/// 西文常用的 1.5–1.6 会明显发挤
+pub const LINE_HEIGHT_PROSE: f32 = 1.92;
+/// 用户气泡行高——气泡内有内边距兜住,比平铺正文收一点更紧凑
+pub const LINE_HEIGHT_BUBBLE: f32 = 1.8;
+
+/// 对话内容列宽,与 FONT_MSG_BODY 绑定(14.5 × 42 ≈ 612)。
+/// 阅读区再宽正文也停在这里并居中:中文超过 ~42 字/行回行容易串行
+pub const PROSE_MAX_W: Pixels = px(612.);
+/// 用户气泡最大宽度(≈ 正文列宽的 78%,右对齐时留出可辨的左侧缺口)
+pub const BUBBLE_MAX_W: Pixels = px(478.);
+
+/// 段落等块级元素之间的间距(rem 基准被 Root 钉在 14px)。
+/// 标题上方的间距不走这里,见 `workbench::heading_top_gap`。
+pub const PROSE_PARAGRAPH_GAP: f32 = 1.05;
+
+// ---------------- 三栏宽度 ----------------
+// 侧栏与会话流固定宽,阅读区吃剩余。详情页按窗口宽反算标题可用宽度,
+// 所以这两个数必须是常量而非 render 里的字面量。
+
+/// 资料库侧栏宽度
+pub const SIDEBAR_W: Pixels = px(224.);
+/// 会话流宽度
+pub const STREAM_W: Pixels = px(336.);
+/// 详情头部右侧操作区的实测占宽(Resume 分段钮 + 星 + 钉 + 更多 + 间距),
+/// 标题可用宽度由窗口宽减去它反推。改动操作区按钮数量时要重新实测
+pub const DETAIL_ACTIONS_W: Pixels = px(196.);
+
+// ---------------- 字宽 → 格数 ----------------
+// 定宽处的文字走 `format::clip_display` 自截断。宽度会变的地方,格数必须
+// 从当前像素宽反算而不是写死,否则窗口拖宽后截断长度不会补齐。
+// 一格 = 一个 ASCII 字符宽(CJK 记 2 格);下面是各字号实测的每格像素。
+
+/// FONT_TITLE 22px semibold
+pub const CELL_PX_TITLE: f32 = 10.5;
+/// FONT_MSG_MONO 11.75px 等宽
+pub const CELL_PX_MONO: f32 = 7.05;
+
+/// 可用像素宽 → 可容纳的格数
+pub fn cells_for(width: Pixels, cell_px: f32) -> usize {
+    ((f32::from(width) / cell_px) as usize).max(8)
+}
+
+/// 用户气泡圆角(Claude Desktop 形制,比面板圆得多)
+pub const RADIUS_BUBBLE: Pixels = px(18.);
+/// thinking / 工具卡 / 代码面的圆角
+pub const RADIUS_PANEL: Pixels = px(10.);
 
 // ---------------- 平台文案 ----------------
 // 同一处 UI 在不同平台叫不同名字/键(Finder vs File Explorer vs 文件管理器、
@@ -143,6 +195,9 @@ pub const RADIUS_BUTTON: Pixels = px(6.);
 pub const RADIUS_KBD: Pixels = px(5.);
 /// 小胶囊 badge(项目名 / model / source / 各处计数共用)
 pub const RADIUS_BADGE: Pixels = px(4.);
+/// 数据可视化里的小色块(热力图格子、柱条)。11px 的格子用 4px 圆角会显得
+/// 发圆、丢掉方格的读数感,单独一档
+pub const RADIUS_CELL: Pixels = px(2.);
 
 // ---------------- 组件度量派生 ----------------
 

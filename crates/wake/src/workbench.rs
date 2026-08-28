@@ -24,6 +24,7 @@ use futures::StreamExt;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_component::highlighter::HighlightTheme;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::list::{List, ListDelegate, ListEvent, ListItem, ListState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -46,7 +47,8 @@ use wake_core::services::{exporter, terminal};
 use wake_core::watcher::{start_watcher, SessionWatcher};
 
 use crate::format::{
-    abs_date, expand_tilde, fmt_tokens, month_year, one_line, smart_time, thousands, tilde_path,
+    abs_date, clip_display, expand_tilde, fmt_tokens, month_year, one_line, relative_time,
+    thousands, tilde_path,
 };
 use crate::settings::{SettingsPage, SettingsView};
 use crate::ui::*;
@@ -121,13 +123,151 @@ impl ScanEvents for ChannelEvents {
 
 pub struct SessionsDelegate {
     pub sessions: Vec<SessionMeta>,
+    /// 按时间分好的组:(组头文案, 在 `sessions` 里的下标区间)。
+    /// 存区间而不是各存一份 SessionMeta——那是十几个 String 字段的深拷贝。
+    /// 不分组时是单个组名为空的组,`render_section_header` 返回 None。
+    groups: Vec<(SharedString, std::ops::Range<usize>)>,
+}
+
+impl SessionsDelegate {
+    fn new(sessions: Vec<SessionMeta>, sort: SortKey, ascending: bool) -> Self {
+        let groups = build_groups(&sessions, sort, ascending);
+        Self { sessions, groups }
+    }
+
+    /// IndexPath → `sessions` 的扁平下标
+    fn flat_index(&self, ix: IndexPath) -> Option<usize> {
+        let (_, range) = self.groups.get(ix.section)?;
+        let flat = range.start + ix.row;
+        (flat < range.end).then_some(flat)
+    }
+
+    /// 扁平下标 → IndexPath(选中与滚动定位用)
+    fn index_path(&self, flat: usize) -> Option<IndexPath> {
+        let (section, (_, range)) = self
+            .groups
+            .iter()
+            .enumerate()
+            .find(|(_, (_, r))| r.contains(&flat))?;
+        Some(IndexPath::new(flat - range.start).section(section))
+    }
+}
+
+/// 把会话切成 Today / Yesterday / Earlier this week / … 的时间组。
+///
+/// 只在**时间倒序**下分组:按消息数排序时时间不单调,分组会碎成一堆单元素
+/// 组;正序时组头顺序会反着读。其余情况退回单个匿名组(不渲染组头)。
+fn build_groups(
+    sessions: &[SessionMeta],
+    sort: SortKey,
+    ascending: bool,
+) -> Vec<(SharedString, std::ops::Range<usize>)> {
+    if sessions.is_empty() {
+        return Vec::new();
+    }
+    let groupable = matches!(sort, SortKey::Updated | SortKey::Created) && !ascending;
+    if !groupable {
+        return vec![(SharedString::default(), 0..sessions.len())];
+    }
+    let key_of = |s: &SessionMeta| match sort {
+        SortKey::Created => s.created_at,
+        _ => s.updated_at,
+    };
+    let mut groups: Vec<(SharedString, std::ops::Range<usize>)> = Vec::new();
+    // 置顶在 DB 层就排到了最前(ORDER BY pinned DESC),它们的时间戳与后面
+    // 的行不连续。混进时间分组会切出重复组头——置顶里有今天的、后面还有
+    // 今天的,就会出现两个 Today。单独成组
+    let pinned = sessions.iter().take_while(|s| s.pinned).count();
+    if pinned > 0 {
+        groups.push((SharedString::new_static("Pinned"), 0..pinned));
+    }
+    for (ix, s) in sessions.iter().enumerate().skip(pinned) {
+        let label = time_bucket(key_of(s));
+        match groups.last_mut() {
+            Some((last, range)) if *last == label => range.end = ix + 1,
+            _ => groups.push((label, ix..ix + 1)),
+        }
+    }
+    groups
+}
+
+/// 时间戳 → 组头文案。UI 语言英文,月份走 chrono 的英文月名。
+fn time_bucket(ts: i64) -> SharedString {
+    use chrono::{Datelike as _, Local, TimeZone as _};
+    let Some(dt) = Local.timestamp_millis_opt(ts).single() else {
+        return "Undated".into();
+    };
+    let today = Local::now().date_naive();
+    let days = (today - dt.date_naive()).num_days();
+    match days {
+        i64::MIN..=0 => "Today".into(),
+        1 => "Yesterday".into(),
+        2..=6 => "Earlier this week".into(),
+        _ if dt.year() == today.year() => dt.format("%B").to_string().into(),
+        _ => dt.format("%B %Y").to_string().into(),
+    }
 }
 
 impl ListDelegate for SessionsDelegate {
     type Item = ListItem;
 
-    fn items_count(&self, _section: usize, _cx: &App) -> usize {
-        self.sessions.len()
+    fn sections_count(&self, _cx: &App) -> usize {
+        self.groups.len()
+    }
+
+    fn items_count(&self, section: usize, _cx: &App) -> usize {
+        self.groups.get(section).map_or(0, |(_, r)| r.len())
+    }
+
+    fn render_section_header(
+        &mut self,
+        section: usize,
+        _window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) -> Option<impl IntoElement> {
+        let (label, _) = self.groups.get(section)?;
+        if label.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        Some(
+            div()
+                .w_full()
+                .mx(SPACE_SM)
+                // 与详情头「标题 → 元信息」的 gap 同值:首组组头因此与右栏元信息
+                // 行齐平。对所有组头必须一致——List 只测量 section 0 的高度再套
+                // 给全部组头(list.rs:406);组间分隔靠线,不靠拉大间距
+                .pt(SPACE_SM)
+                .pb(SPACE_XS)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap(px(7.))
+                        .items_center()
+                        .child(
+                            div()
+                                .w(px(3.))
+                                .h(px(11.))
+                                .flex_shrink_0()
+                                .rounded(px(1.5))
+                                .bg(rgb(crate::theme::DATE_GROUP_ACCENT)),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(FONT_LABEL)
+                                .font_medium()
+                                .text_color(theme.muted_foreground)
+                                .child(label.to_uppercase()),
+                        )
+                        // 发丝线接在文字后面延伸出去,标记"这一组从这里开始"。
+                        // 首组上方就是列表顶部,无需与谁分隔,所以不画——
+                        // 线高 1px 被文字撑住,去掉它不改变组头高度
+                        .when(section > 0, |row| {
+                            row.child(div().flex_1().h(px(1.)).bg(theme.border))
+                        }),
+                ),
+        )
     }
 
     fn render_item(
@@ -136,12 +276,24 @@ impl ListDelegate for SessionsDelegate {
         _window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
-        let s = self.sessions.get(ix.row)?;
+        let s = self.sessions.get(self.flat_index(ix)?)?;
         let theme = cx.theme();
-        let updated_time: SharedString = smart_time(s.updated_at).into();
-        let updated_tooltip: SharedString = abs_date(s.updated_at).into();
+
+        // 行内文字全部按格数自截断(见 clip_display 的注释:gpui 的 truncate
+        // 在虚拟列表里不画省略号)。格数按 336px 列宽减去 ListItem 与行内
+        // 边距、图标、时间列之后的余量折算,列宽是固定值所以阈值稳定。
+        const TITLE_CELLS: usize = 42;
+        const PROJECT_CELLS: usize = 14;
+        // model 不进列表:336px 的列放不下"项目 + 消息数 + model + 时间",
+        // 硬塞会把项目名挤成两三个字。model 在详情页元信息带里
+        let facts = if s.message_count > 0 {
+            format!("{} messages", s.message_count)
+        } else {
+            String::new()
+        };
 
         Some(
+            // mx 是选中胶囊的左右留白
             ListItem::new(ix.row)
                 .rounded(theme.radius)
                 .mx(SPACE_SM)
@@ -150,24 +302,46 @@ impl ListDelegate for SessionsDelegate {
                         .w_full()
                         .px(SPACE_XS)
                         .py(SPACE_SM)
-                        .gap(SPACE_XS)
+                        .gap(px(5.))
+                        // 标题独占一行,星标/置顶与时间下沉到元信息行
+                        .child(
+                            div()
+                                // nowrap 是兜底:格数是估算值,超了只能裁,绝不
+                                // 能换行——List 只测一行高度套给所有行(list.rs:406)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(FONT_BODY)
+                                .font_medium()
+                                .text_color(theme.foreground)
+                                .child(clip_display(&s.title, TITLE_CELLS)),
+                        )
                         .child(
                             h_flex()
                                 .gap(px(6.))
+                                .items_center()
+                                .text_size(FONT_LABEL)
+                                .text_color(theme.muted_foreground)
+                                // agent 图标固定保留,是每行的身份锚点
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(FONT_BODY)
-                                        .font_medium()
-                                        .text_color(theme.foreground)
-                                        .truncate()
-                                        .child(s.title.clone()),
+                                    img(s.agent.brand_icon(theme.mode.is_dark()))
+                                        .size(px(14.))
+                                        .flex_shrink_0(),
                                 )
+                                .child(badge(
+                                    clip_display(&s.project_name, PROJECT_CELLS),
+                                    theme.muted,
+                                    theme.muted_foreground,
+                                ))
+                                .when(!facts.is_empty(), |this| {
+                                    this.child(meta_sep(theme.muted_foreground))
+                                        .child(div().flex_shrink_0().child(facts.clone()))
+                                })
+                                .child(div().flex_1())
                                 .when(s.pinned, |this| {
                                     this.child(
                                         icon("icons/pin-filled.svg")
                                             .with_size(px(11.))
+                                            .flex_shrink_0()
                                             .text_color(theme.primary),
                                     )
                                 })
@@ -175,38 +349,11 @@ impl ListDelegate for SessionsDelegate {
                                     this.child(
                                         icon("icons/star-filled.svg")
                                             .with_size(px(11.))
+                                            .flex_shrink_0()
                                             .text_color(rgb(crate::theme::STAR_YELLOW)),
                                     )
-                                }),
-                        )
-                        .child(
-                            h_flex()
-                                .gap(px(6.))
-                                .text_size(FONT_LABEL)
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    img(s.agent.brand_icon(theme.mode.is_dark()))
-                                        .size(px(15.))
-                                        .flex_shrink_0(),
-                                )
-                                .child(badge(
-                                    s.project_name.clone(),
-                                    theme.muted,
-                                    theme.muted_foreground,
-                                ))
-                                .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .id(("session-updated-time", ix.row))
-                                        .flex_shrink_0()
-                                        .child(updated_time)
-                                        .tooltip(move |window, cx| {
-                                            gpui_component::tooltip::Tooltip::new(
-                                                updated_tooltip.clone(),
-                                            )
-                                            .build(window, cx)
-                                        }),
-                                ),
+                                })
+                                .child(div().flex_shrink_0().child(relative_time(s.updated_at))),
                         ),
                 ),
         )
@@ -247,7 +394,7 @@ impl ListDelegate for SearchDelegate {
         let h = self.hits.get(ix.row)?;
         let theme = cx.theme();
         let timestamp = h.timestamp.unwrap_or(0);
-        let hit_time: SharedString = smart_time(timestamp).into();
+        let hit_time: SharedString = relative_time(timestamp).into();
         let hit_time_tooltip: SharedString = abs_date(timestamp).into();
         let snippet = h
             .snippet
@@ -415,10 +562,14 @@ struct DetailState {
     /// 过滤后的可见消息。Rc 让行渲染以引用计数克隆代替整条消息深拷贝
     transcript: Rc<Vec<TranscriptMessage>>,
     loading: bool,
+    /// 解析失败的原因。Some 时阅读区渲染错误面板
+    error: Option<SharedString>,
     /// 逐消息不等高列表(gpui 原生 ListState,惰性测量)
     msg_list: gpui::ListState,
-    /// 展开的工具簇/thinking(按消息在 transcript 里的下标)
-    expanded_rows: HashSet<usize>,
+    /// 展开的工具簇(按消息在 transcript 里的下标)
+    expanded_tools: HashSet<usize>,
+    /// 展开的 thinking。与工具簇分开存,否则两者会互相带着开
+    expanded_thinking: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
 }
@@ -674,9 +825,7 @@ impl Workbench {
 
         let list_state = cx.new(|cx| {
             ListState::new(
-                SessionsDelegate {
-                    sessions: Vec::new(),
-                },
+                SessionsDelegate::new(Vec::new(), SortKey::Updated, false),
                 window,
                 cx,
             )
@@ -818,7 +967,8 @@ impl Workbench {
             title_query: None,
             sort: self.sort_key,
             ascending: self.sort_ascending,
-            limit: 500,
+            // 列表是虚拟滚动的,这个上限只为兜住内存;超出时中栏底部会明说
+            limit: 2000,
             offset: 0,
         }
     }
@@ -827,8 +977,11 @@ impl Workbench {
         let filter = self.current_filter();
         if let Ok((sessions, total)) = self.store.list_sessions(&filter) {
             self.total_sessions = total;
+            let (sort, ascending) = (self.sort_key, self.sort_ascending);
             self.list_state.update(cx, |state, cx| {
-                state.delegate_mut().sessions = sessions;
+                // 整体换 delegate:分组由排序方式与时间戳推出,只换数据会
+                // 留下上一轮的分组区间
+                *state.delegate_mut() = SessionsDelegate::new(sessions, sort, ascending);
                 cx.notify();
             });
         }
@@ -1112,6 +1265,8 @@ impl Workbench {
         ) {
             Ok(handle) => {
                 workbench.update(cx, |this, _| this.settings_window = Some(handle.into()));
+                // 逐窗口属性,新窗口要再关一次
+                crate::macos::suppress_titlebar_separator();
                 cx.activate(true);
             }
             Err(error) => eprintln!("failed to open Wake settings: {error}"),
@@ -1807,12 +1962,13 @@ impl Workbench {
             ListEvent::Select(ix) | ListEvent::Confirm(ix) => *ix,
             ListEvent::Cancel => return,
         };
-        let key = list
-            .read(cx)
-            .delegate()
-            .sessions
-            .get(ix.row)
-            .map(|s| s.key.clone());
+        let key = {
+            let delegate = list.read(cx).delegate();
+            delegate
+                .flat_index(ix)
+                .and_then(|flat| delegate.sessions.get(flat))
+                .map(|s| s.key.clone())
+        };
         if let Some(key) = key {
             self.open_detail(&key, None, window, cx);
         }
@@ -2078,9 +2234,11 @@ impl Workbench {
             meta: meta.clone(),
             transcript: Rc::new(Vec::new()),
             loading: true,
+            error: None,
             // Bottom 对齐 = 聊天语义:打开落在最新消息,向上翻历史
             msg_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(512.)),
-            expanded_rows: HashSet::new(),
+            expanded_tools: HashSet::new(),
+            expanded_thinking: HashSet::new(),
             jump_seq,
         });
         // 搜索路径:中栏列表同步选中并滚到该会话。
@@ -2094,9 +2252,16 @@ impl Workbench {
         let task = cx.background_spawn(async move {
             // adapter_for 按文件路径挑实例:自定义 location 的会话必须由
             // 拥有其根的实例解析(gemini/kimi 的 cwd 反查是实例相对侧档)
-            let adapter = adapter_for(&adapters, meta.agent, &meta.file_path)?;
+            let Some(adapter) = adapter_for(&adapters, meta.agent, &meta.file_path) else {
+                return Err(format!(
+                    "No {} reader is configured for this file.",
+                    meta.agent.display_name()
+                ));
+            };
             let r = SessionFileRef::from_meta(&meta);
-            let t = adapter.parse_transcript(&r).ok()?;
+            let t = adapter
+                .parse_transcript(&r)
+                .map_err(|e| format!("Couldn't read this session file: {e}"))?;
             let visible: Vec<TranscriptMessage> = t
                 .mainline
                 .into_iter()
@@ -2108,14 +2273,14 @@ impl Workbench {
                             || m.kind == MessageKind::CompactSummary)
                 })
                 .collect();
-            Some((meta.key.clone(), visible))
+            Ok((meta.key.clone(), visible))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, _window, cx| {
                 if let Some(detail) = &mut this.detail {
                     match result {
-                        Some((key, messages)) if key == detail.meta.key => {
+                        Ok((key, messages)) if key == detail.meta.key => {
                             detail.msg_list = gpui::ListState::new(
                                 messages.len(),
                                 gpui::ListAlignment::Bottom,
@@ -2138,7 +2303,12 @@ impl Workbench {
                             detail.transcript = Rc::new(messages);
                             detail.loading = false;
                         }
-                        _ => detail.loading = false,
+                        // key 不匹配 = 已切走,这一轮结果作废
+                        Ok(_) => {}
+                        Err(reason) => {
+                            detail.error = Some(reason.into());
+                            detail.loading = false;
+                        }
                     }
                 }
                 cx.notify();
@@ -2174,16 +2344,18 @@ impl Workbench {
     /// 命中可能不在列表里),中栏定位选中该会话并滚到可见
     fn sync_list_selection(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.show_all_sessions(window, cx);
-        let row = self
-            .list_state
-            .read(cx)
-            .delegate()
-            .sessions
-            .iter()
-            .position(|s| s.key == key);
+        let row = {
+            let delegate = self.list_state.read(cx).delegate();
+            delegate
+                .sessions
+                .iter()
+                .position(|s| s.key == key)
+                .and_then(|flat| delegate.index_path(flat))
+        };
+        // 命中排在 limit 之外时 row 为 None:详情页已开,这里只是不滚动
         if let Some(row) = row {
             self.list_state.update(cx, |state, cx| {
-                state.set_selected_index(Some(IndexPath::new(row)), window, cx);
+                state.set_selected_index(Some(row), window, cx);
                 // 组件无 strict-Top:非 Center 策略都是"最小滚动恰好可见",
                 // 目标从下方进入会贴底。先把 offset 拉到超底,deferred 消费时
                 // 目标位于视口上方,最小滚动分支即把它对齐到视口顶。
@@ -2191,7 +2363,7 @@ impl Workbench {
                 // scroll_strict 字段目前写死 false 未被读——它被接通之日,
                 // 换成 strict-Top 调用并删掉这行 set_offset
                 state.scroll_handle().set_offset(point(px(0.), px(-1e9)));
-                state.scroll_to_item(IndexPath::new(row), ScrollStrategy::Top, window, cx);
+                state.scroll_to_item(row, ScrollStrategy::Top, window, cx);
             });
         }
     }
@@ -2474,7 +2646,7 @@ impl Workbench {
         let show_titlebar = cfg!(target_os = "macos")
             || matches!(window.window_decorations(), Decorations::Client { .. });
         v_flex()
-            .w(px(224.))
+            .w(SIDEBAR_W)
             .h_full()
             .flex_shrink_0()
             .bg(theme.sidebar)
@@ -2727,18 +2899,6 @@ impl Workbench {
     fn render_session_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let shown = self.list_state.read(cx).delegate().sessions.len();
-        let library_empty = self.agent_counts.iter().map(|(_, n)| *n).sum::<i64>() == 0;
-        let listed_count = self.total_sessions.max(0);
-        let shown_label: SharedString = format!(
-            "{} {}",
-            listed_count,
-            if listed_count == 1 {
-                "session"
-            } else {
-                "sessions"
-            }
-        )
-        .into();
         let sort_key = self.sort_key;
         let sort_ascending = self.sort_ascending;
         let sort_entity = cx.entity();
@@ -2757,6 +2917,7 @@ impl Workbench {
             }
         );
         // 与详情工具栏统一：icon-only ghost，常态透明、hover 才出现背景。
+        // 当前排序方式由 tooltip 给出
         let sort_menu = Button::new("sort-sessions")
             .ghost()
             .rounded(RADIUS_BUTTON)
@@ -2794,8 +2955,10 @@ impl Workbench {
                     .item(mk_dir("Ascending", true))
             })
             .anchor(Corner::TopRight);
+        // 被 limit 截断时要说出来,否则侧栏计数与列表长度互相矛盾
+        let truncated = self.total_sessions > shown as i64;
         v_flex()
-            .w(px(336.))
+            .w(STREAM_W)
             .h_full()
             .flex_shrink_0()
             .bg(theme.list)
@@ -2803,107 +2966,123 @@ impl Workbench {
                 v_flex()
                     .id("list-header")
                     .w_full()
-                    .h(LIBRARY_IDENTITY_HEIGHT)
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
                     .px(SPACE_LG)
-                    .justify_center()
+                    // 与详情头同一个顶部偏移:两栏标题因此等高。不用固定高度
+                    // 居中——中栏只有标题一行、详情有标题+元信息两行,居中之下
+                    // 两者必然错开,且「标题对齐」与「组头对齐元信息」不可兼得
+                    .pt(SPACE_XL)
+                    // 首组与标题的距离 = 这里 + 组头 pt。加在这一侧而不是组头上:
+                    // 组头 pt 同时管着组间距,且对所有组头必须一致
+                    .pb(SPACE_SM)
                     .child(
                         h_flex()
                             .w_full()
                             .items_start()
                             .justify_between()
+                            .gap(SPACE_SM)
                             .child(
-                                v_flex()
+                                // 角标是带内边距的胶囊,baseline 对齐会坐低半档
+                                h_flex()
                                     .min_w_0()
-                                    .gap(px(2.))
+                                    .items_center()
+                                    .gap(SPACE_SM)
                                     .child(
                                         div()
+                                            .min_w_0()
                                             .truncate()
                                             .text_size(FONT_TITLE)
                                             .font_semibold()
                                             .child(self.context_title()),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(FONT_LABEL)
-                                            .text_color(theme.muted_foreground)
-                                            .child(shown_label),
-                                    ),
+                                    .when(self.total_sessions > 0, |this| {
+                                        this.child(
+                                            div().flex_shrink_0().text_size(FONT_LABEL).child(
+                                                badge(
+                                                    self.total_sessions.to_string(),
+                                                    theme.muted,
+                                                    theme.muted_foreground,
+                                                ),
+                                            ),
+                                        )
+                                    }),
                             )
                             .child(div().flex_shrink_0().pt(px(2.)).child(sort_menu)),
                     ),
             )
             .child(if shown == 0 {
-                if library_empty && self.scan.scanning {
-                    v_flex()
-                        .flex_1()
-                        .w_full()
-                        .items_center()
-                        .justify_center()
-                        .gap(SPACE_MD)
-                        .text_color(theme.muted_foreground)
-                        .child(Spinner::new())
-                        .child(
-                            div()
-                                .text_size(FONT_BODY)
-                                .font_medium()
-                                .text_color(theme.foreground)
-                                .child("Building your library"),
-                        )
-                        .child(
-                            div()
-                                .text_size(FONT_CAPTION)
-                                .child("Looking for local agent sessions…"),
-                        )
-                        .into_any_element()
-                } else if library_empty {
-                    v_flex()
-                        .flex_1()
-                        .w_full()
-                        .items_center()
-                        .justify_center()
-                        .gap(SPACE_LG)
-                        .child(empty_state(
-                            "icons/layers.svg",
+                v_flex()
+                    .flex_1()
+                    .justify_center()
+                    // 首次全量扫描期间列表本来就是空的,不能报"没有匹配项"
+                    .child(if self.scan.scanning {
+                        empty_state(
+                            "icons/loader-circle.svg",
                             px(48.),
                             px(22.),
-                            "Your library is empty",
-                            "Add a local session location to get started.",
+                            "Indexing your sessions",
+                            match self.scan.total {
+                                0 => "Looking for session files…".to_string(),
+                                total => format!("{} of {total} sessions", self.scan.done),
+                            },
                             cx,
-                        ))
-                        .child(
-                            Button::new("empty-open-settings")
-                                .primary()
-                                .small()
-                                .rounded(RADIUS_BUTTON)
-                                .label("Add a location")
-                                .on_click(cx.listener(|this, _, _window, cx| {
-                                    this.settings_page = SettingsPage::Locations;
-                                    this.open_settings(cx);
-                                })),
                         )
-                        .into_any_element()
-                } else {
-                    v_flex()
-                        .flex_1()
-                        .w_full()
-                        .justify_center()
-                        .child(empty_state(
+                    } else if let Some(err) = self.scan.error.clone() {
+                        empty_state(
+                            "icons/circle-x.svg",
+                            px(48.),
+                            px(22.),
+                            "Couldn't index your sessions",
+                            err,
+                            cx,
+                        )
+                    } else if self.favorite_only
+                        || self.selected_agent.is_some()
+                        || self.selected_project.is_some()
+                    {
+                        empty_state(
                             "icons/inbox.svg",
                             px(48.),
                             px(22.),
-                            "No matching sessions",
-                            "Try a different agent, project, or filter.",
+                            "No sessions here",
+                            "Pick All Sessions in the sidebar to see everything.",
                             cx,
-                        ))
-                        .into_any_element()
-                }
+                        )
+                    } else {
+                        empty_state(
+                            "icons/inbox.svg",
+                            px(48.),
+                            px(22.),
+                            "No sessions yet",
+                            "Wake found no agent sessions on this Mac.",
+                            cx,
+                        )
+                    })
+                    .into_any_element()
             } else {
-                List::new(&self.list_state)
+                v_flex()
                     .flex_1()
                     .min_h_0()
-                    .w_full()
+                    .child(List::new(&self.list_state).flex_1().min_h_0())
+                    .when(truncated, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .w_full()
+                                .px(SPACE_LG)
+                                .py(SPACE_SM)
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .text_size(FONT_LABEL)
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(format!(
+                                    "Showing the {shown} most recent of {} sessions",
+                                    self.total_sessions
+                                )),
+                        )
+                    })
                     .into_any_element()
             })
     }
@@ -2918,9 +3097,14 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // 窄窗口下阅读区不足 PROSE_MAX_W,工具卡参数格数要跟着收
+        let prose_w =
+            (window.viewport_size().width - SIDEBAR_W - STREAM_W - SPACE_MD * 2. - px(20.))
+                .clamp(px(220.), PROSE_MAX_W);
+        // 减去卡片内边距 26 + chevron 11 + gap 14 + 名称与徽标约 100
+        let tool_arg_cells = cells_for((prose_w - px(151.)).max(px(80.)), CELL_PX_MONO);
         let theme = cx.theme();
         let dark = theme.mode.is_dark();
-        let muted_fg = theme.muted_foreground;
         // 尾部要用的 Copy 值提前取出,theme 借用不跨越 inner 构建期的 &mut cx
         let jump_bg = theme.primary.opacity(0.09);
         let jump_radius = theme.radius;
@@ -2928,7 +3112,8 @@ impl Workbench {
             return div().into_any_element();
         };
         let total = detail.transcript.len();
-        let expanded = detail.expanded_rows.contains(&ix);
+        let tools_open = detail.expanded_tools.contains(&ix);
+        let think_open = detail.expanded_thinking.contains(&ix);
         let jump_seq = detail.jump_seq;
         // Rc 克隆只加引用计数;逐行借用,避免每帧深拷贝整条消息(text 可达 32KB)
         let transcript = detail.transcript.clone();
@@ -2951,79 +3136,75 @@ impl Workbench {
             centered_pill("Context compacted", cx).into_any_element()
         } else {
             match m.role {
+                // 角色靠形态区分:用户右对齐气泡,助手全宽平铺,不加文字标签
                 Role::User => h_flex()
                     .w_full()
                     .justify_end()
                     .child(
                         div()
-                            .max_w(px(540.))
+                            .max_w(BUBBLE_MAX_W)
                             .min_w_0()
-                            .rounded(theme.radius_lg)
-                            .bg(theme.muted)
-                            .px(px(14.))
-                            .py(SPACE_SM)
+                            .rounded(RADIUS_BUBBLE)
+                            .bg(crate::theme::bubble_bg(dark))
+                            .px(px(17.))
+                            .py(px(11.))
                             .text_size(FONT_MSG_USER)
-                            .child(
-                                TextView::markdown(
-                                    SharedString::from(format!("dmsg-{}", m.seq)),
-                                    m.text.clone(),
-                                    window,
-                                    cx,
-                                )
-                                .style(TextViewStyle {
-                                    heading_base_font_size: FONT_MSG_USER,
-                                    paragraph_gap: gpui::rems(0.5),
-                                    is_dark: dark,
-                                    ..Default::default()
-                                })
-                                .line_height(relative(1.45))
-                                .selectable(true),
-                            ),
+                            .line_height(relative(LINE_HEIGHT_BUBBLE))
+                            .child(markdown_body(
+                                format!("dmsg-{}", m.seq).into(),
+                                m.text.clone(),
+                                FONT_MSG_USER,
+                                dark,
+                                window,
+                                cx,
+                            )),
                     )
                     .into_any_element(),
                 Role::Assistant => {
-                    let mut col = v_flex().w_full().min_w_0().gap(SPACE_SM);
-                    if !m.text.is_empty() {
-                        if let Some(th) = &m.thinking {
-                            col = col.child(
-                                div()
-                                    .text_size(FONT_MSG_THINKING)
-                                    .italic()
-                                    .text_color(muted_fg)
-                                    .truncate()
-                                    .child(format!("Thinking · {}", one_line(th, 200))),
-                            );
-                        }
+                    // thinking 卡 / 正文 / 工具卡之间的呼吸
+                    let mut col = v_flex().w_full().min_w_0().gap(px(12.));
+                    if let Some(th) = &m.thinking {
+                        col = col.child(think_panel(
+                            ix,
+                            th,
+                            think_open,
+                            cx.listener(move |this, _, _window, cx| {
+                                if let Some(detail) = &mut this.detail {
+                                    if !detail.expanded_thinking.insert(ix) {
+                                        detail.expanded_thinking.remove(&ix);
+                                    }
+                                    detail.msg_list.splice(ix..ix + 1, 1);
+                                }
+                                cx.notify();
+                            }),
+                            cx,
+                        ));
                     }
                     if !m.text.is_empty() {
                         col = col.child(
-                            div().text_size(FONT_MSG_BODY).child(
-                                TextView::markdown(
-                                    SharedString::from(format!("dmsg-{}", m.seq)),
-                                    m.text.clone(),
+                            div()
+                                .text_size(FONT_MSG_BODY)
+                                .line_height(relative(LINE_HEIGHT_PROSE))
+                                .child(markdown_message(
+                                    m.seq,
+                                    &m.text,
+                                    FONT_MSG_BODY,
+                                    dark,
                                     window,
                                     cx,
-                                )
-                                .style(TextViewStyle {
-                                    heading_base_font_size: FONT_MSG_BODY,
-                                    paragraph_gap: gpui::rems(0.6),
-                                    is_dark: dark,
-                                    ..Default::default()
-                                })
-                                .line_height(relative(1.5))
-                                .selectable(true),
-                            ),
+                                )),
                         );
                     }
                     if !m.tool_calls.is_empty() {
                         col = col.child(tool_cluster(
                             ix,
                             &m.tool_calls,
-                            expanded,
+                            tool_arg_cells,
+                            tools_open,
                             cx.listener(move |this, _, _window, cx| {
                                 if let Some(detail) = &mut this.detail {
-                                    if !detail.expanded_rows.insert(ix) {
-                                        detail.expanded_rows.remove(&ix);
+                                    if !detail.expanded_tools.insert(ix) {
+                                        detail.expanded_tools.remove(&ix);
                                     }
                                     // 行高随展开变化,让 list 重测该行
                                     detail.msg_list.splice(ix..ix + 1, 1);
@@ -3043,15 +3224,14 @@ impl Workbench {
             .w_full()
             .flex()
             .justify_center()
-            // 与详情头共用 24px 阅读轴，正文、标题和元信息形成一条竖线。
-            .px(SPACE_XXL)
-            .py(SPACE_SM)
-            .when(ix == 0, |d| d.pt(SPACE_LG))
+            .px(px(10.))
+            .py(px(15.))
+            .when(ix == 0, |d| d.pt(SPACE_XXL))
             .when(ix + 1 == total, |d| d.pb(SPACE_XXL))
             .child(
                 div()
                     .w_full()
-                    .max_w(px(720.))
+                    .max_w(PROSE_MAX_W)
                     .min_w_0()
                     // 淡 primary 底:标记搜索命中落点(尾部命中不滚动,全靠它识别)。
                     // 负 margin + 等量 padding:背景向外扩出呼吸边,内容原位不推挤,
@@ -3152,7 +3332,7 @@ impl Workbench {
                 .gap(px(2.))
                 .child(
                     div()
-                        .text_size(FONT_TITLE)
+                        .text_size(FONT_DISPLAY)
                         .font_semibold()
                         .text_color(theme.foreground)
                         .child(value),
@@ -3167,7 +3347,7 @@ impl Workbench {
         // 序:Sessions / Tokens / Prompts / Agents / Projects / Active days
         // (用户钉的)
         let overview = h_flex()
-            .gap(px(40.))
+            .gap(SPACE_XXL)
             .child(stat(thousands(d.sessions), "Sessions"))
             .when(d.tokens > 0, |row| {
                 row.child(stat(fmt_tokens(Some(d.tokens)), "Tokens"))
@@ -3367,7 +3547,7 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_detail(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_detail(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(detail) = &self.detail else {
             return v_flex()
@@ -3390,6 +3570,13 @@ impl Workbench {
                 .into_any_element();
         };
         let meta = &detail.meta;
+        // 窗口宽 − 侧栏 − 会话流 − 头部内边距 − 操作区,每帧重算
+        let title_w = (window.viewport_size().width
+            - SIDEBAR_W
+            - STREAM_W
+            - SPACE_LG * 2.
+            - DETAIL_ACTIONS_W)
+            .max(px(140.));
         let session_id = meta.id.clone();
         let export_entity = cx.entity();
         let reveal_entity = export_entity.clone();
@@ -3446,12 +3633,6 @@ impl Workbench {
             })
             .anchor(Corner::TopRight);
 
-        let detail_path: SharedString = if meta.project_path.is_empty() {
-            "Unknown project".to_string()
-        } else {
-            meta.project_path.clone()
-        }
-        .into();
         let mut detail_facts: Vec<String> = Vec::new();
         if meta.message_count > 0 {
             detail_facts.push(format!("{} messages", meta.message_count));
@@ -3459,20 +3640,6 @@ impl Workbench {
         if let Some(tokens) = meta.tokens_used {
             detail_facts.push(format!("{} tokens", fmt_tokens(Some(tokens))));
         }
-        let has_detail_facts = !detail_facts.is_empty();
-        let detail_fact_line: SharedString = detail_facts.join(" · ").into();
-        let created_time: Option<(SharedString, SharedString)> = (meta.created_at > 0).then(|| {
-            (
-                format!("Created {}", smart_time(meta.created_at)).into(),
-                format!("Created {}", abs_date(meta.created_at)).into(),
-            )
-        });
-        let updated_time: Option<(SharedString, SharedString)> = (meta.updated_at > 0).then(|| {
-            (
-                format!("Updated {}", smart_time(meta.updated_at)).into(),
-                format!("Updated {}", abs_date(meta.updated_at)).into(),
-            )
-        });
 
         v_flex()
             .flex_1()
@@ -3482,40 +3649,43 @@ impl Workbench {
             .child(
                 v_flex()
                     .id("detail-header")
+                    .w_full()
                     .flex_shrink_0()
                     .window_control_area(WindowControlArea::Drag)
-                    .px(SPACE_XXL)
-                    .pb(SPACE_SM)
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .px(SPACE_LG)
+                    .pt(SPACE_XL)
+                    .pb(SPACE_MD)
+                    // 两层:标题行(含操作区)+ 单条元信息带。gap 与会话流「header
+                    // 的 pb + 组头 pt」等值,首组组头因此与这条元信息带齐平
+                    .gap(SPACE_LG)
                     .child(
                         h_flex()
-                            .w_full()
-                            .h(WINDOW_TITLEBAR_HEIGHT)
+                            .gap(SPACE_LG)
                             .items_center()
-                            .justify_between()
-                            .gap(SPACE_MD)
                             .child(
-                                h_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(SPACE_SM)
-                                    .items_center()
-                                    .text_size(FONT_LABEL)
-                                    .text_color(theme.muted_foreground)
-                                    .child(img(meta.agent.brand_icon(theme.mode.is_dark())).size(px(15.)).flex_shrink_0())
-                                    .child(div().flex_shrink_0().child(meta.agent.display_name()))
-                                    .child(badge(meta.project_name.clone(), theme.muted, theme.muted_foreground))
-                                    .when_some(meta.git_branch.clone(), |this, branch| {
-                                        this.child(
-                                            h_flex()
-                                                .min_w_0()
-                                                .gap(SPACE_XS)
-                                                .child(icon("icons/git-branch.svg").with_size(px(11.)).flex_shrink_0())
-                                                .child(div().min_w_0().truncate().child(branch)),
-                                        )
-                                    }),
+                                // 单行截断。格数由 title_w 反算而非写死,否则
+                                // 拖拽窗口变宽后截断长度不会补齐;全文进 tooltip
+                                div()
+                                    .id("detail-title")
+                                    .w(title_w)
+                                    .flex_shrink_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(FONT_TITLE)
+                                    .font_semibold()
+                                    .tooltip({
+                                        let full: SharedString = meta.title.clone().into();
+                                        move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(full.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
+                                    .child(clip_display(
+                                        &meta.title,
+                                        cells_for(title_w, CELL_PX_TITLE),
+                                    )),
                             )
+                            .child(div().flex_1().min_w_0())
                             .child(
                                 h_flex()
                                     .flex_shrink_0()
@@ -3683,141 +3853,126 @@ impl Workbench {
                                     .child(more_menu),
                             ),
                     )
-                    .child(
+                    .child({
+                        // 单条元信息带:身份 · 位置 · 规模 · 时间,同字号同色。
+                        // 完整项目路径与精确时间进 tooltip;JSONL 文件路径不再
+                        // 占位(中段是 UUID,Reveal 入口在 `…` 菜单里)
+                        let mut stats: Vec<String> = Vec::new();
+                        if meta.message_count > 0 {
+                            stats.push(format!("{} messages", meta.message_count));
+                        }
+                        if let Some(tokens) = meta.tokens_used {
+                            stats.push(format!("{} tokens", fmt_tokens(Some(tokens))));
+                        }
+                        if meta.updated_at > 0 {
+                            stats.push(format!("Updated {}", relative_time(meta.updated_at)));
+                        }
+                        let exact_time: SharedString = {
+                            let mut parts: Vec<String> = Vec::new();
+                            if meta.created_at > 0 {
+                                parts.push(format!("Created {}", abs_date(meta.created_at)));
+                            }
+                            if meta.updated_at > 0 {
+                                parts.push(format!("Updated {}", abs_date(meta.updated_at)));
+                            }
+                            parts.join("\n").into()
+                        };
+                        let project_path: SharedString = if meta.project_path.is_empty() {
+                            "Unknown project".into()
+                        } else {
+                            meta.project_path.clone().into()
+                        };
+                        let reveal_path = meta.file_path.clone();
                         h_flex()
-                            .w_full()
-                            .h(WINDOW_TITLEBAR_HEIGHT)
-                            .min_w_0()
+                            .flex_wrap()
+                            .gap(px(7.))
                             .items_center()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(FONT_TITLE)
-                                    .line_height(relative(1.15))
-                                    .font_semibold()
-                                    .child(meta.title.clone()),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .min_w_0()
-                            .pt(SPACE_SM)
-                            .gap(SPACE_SM)
                             .text_size(FONT_LABEL)
                             .text_color(theme.muted_foreground)
                             .child(
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .gap(SPACE_MD)
-                                    .items_center()
-                                    .when_some(meta.model.clone(), |this, model| {
-                                        this.child(outline_badge(
-                                            model,
-                                            rgb(crate::theme::MODEL_BADGE_BG).into(),
-                                        ))
-                                    })
-                                    .when_some(
-                                        meta.source.clone().filter(|s| !s.is_empty()),
-                                        |this, source| {
-                                            let color = if source == "opencode2" {
-                                                theme.primary
-                                            } else {
-                                                theme.success
-                                            };
-                                            this.child(outline_badge(source, color))
-                                        },
-                                    )
-                                    .when(has_detail_facts, |this| {
-                                        this.child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(detail_fact_line),
-                                        )
-                                    }),
+                                img(meta.agent.brand_icon(theme.mode.is_dark()))
+                                    .size(px(13.))
+                                    .flex_shrink_0(),
                             )
+                            .child(div().flex_shrink_0().child(meta.agent.display_name()))
+                            .child(meta_sep(theme.muted_foreground))
+                            // hover 看全路径,点击 Reveal
                             .child(
-                                h_flex()
+                                div()
+                                    .id("detail-project")
                                     .min_w_0()
-                                    .gap(px(6.))
-                                    .child(
-                                        icon("icons/folder.svg")
-                                            .with_size(px(12.))
-                                            .flex_shrink_0(),
-                                    )
-                                    .child(div().min_w_0().truncate().child(detail_path)),
-                            )
-                            .when(created_time.is_some() || updated_time.is_some(), |this| {
-                                this.child(
-                                    h_flex()
-                                        .w_full()
-                                        .min_w_0()
-                                        .gap(px(6.))
-                                        .items_center()
-                                        .child(
-                                            icon("icons/calendar.svg")
-                                                .with_size(px(12.))
-                                                .flex_shrink_0(),
+                                    .truncate()
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_colored(theme.foreground, FONT_LABEL))
+                                    .tooltip(move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(
+                                            project_path.clone(),
                                         )
-                                        .child(
-                                            h_flex()
-                                                .min_w_0()
-                                                .gap(SPACE_MD)
-                                                .when_some(
-                                                    created_time.clone(),
-                                                    |row, (created, tooltip)| {
-                                                        row.child(
-                                                            div()
-                                                                .id("detail-created-time")
-                                                                .min_w_0()
-                                                                .truncate()
-                                                                .child(created)
-                                                                .tooltip(move |window, cx| {
-                                                                    gpui_component::tooltip::Tooltip::new(
-                                                                        tooltip.clone(),
-                                                                    )
-                                                                    .build(window, cx)
-                                                                }),
-                                                        )
-                                                    },
+                                        .build(window, cx)
+                                    })
+                                    .on_click(move |_, _, _| {
+                                        terminal::reveal_in_file_manager(&reveal_path);
+                                    })
+                                    .child(clip_display(&meta.project_name, 34)),
+                            )
+                            // detached HEAD 下透传的 "HEAD" 对用户零信息量
+                            .when_some(
+                                meta.git_branch.clone().filter(|b| {
+                                    let b = b.trim();
+                                    !b.is_empty() && b != "HEAD" && b != "detached"
+                                }),
+                                |this, branch| {
+                                    this.child(meta_sep(theme.muted_foreground)).child(
+                                        h_flex()
+                                            .min_w_0()
+                                            .gap(SPACE_XS)
+                                            .child(
+                                                icon("icons/git-branch.svg")
+                                                    .with_size(px(11.))
+                                                    .flex_shrink_0(),
+                                            )
+                                            .child(div().min_w_0().truncate().child(branch)),
+                                    )
+                                },
+                            )
+                            // model 用同级 muted 文字而非徽标:品牌色只表达
+                            // agent 身份,不该套在所有 agent 的 model 上
+                            .when_some(meta.model.clone(), |this, model| {
+                                this.child(meta_sep(theme.muted_foreground))
+                                    .child(div().flex_shrink_0().child(model))
+                            })
+                            // source 是枚举值不是自由文本,做成徽标才读得出
+                            .when_some(
+                                meta.source.clone().filter(|s| !s.is_empty()),
+                                |this, source| {
+                                    // opencode2 是版本代际标记而非发起平台,
+                                    // 用 primary 蓝与 via 徽章(绿)区分
+                                    let color = if source == "opencode2" {
+                                        theme.primary
+                                    } else {
+                                        theme.success
+                                    };
+                                    this.child(outline_badge(source, color))
+                                },
+                            )
+                            .when(!stats.is_empty(), |this| {
+                                this.child(meta_sep(theme.muted_foreground)).child(
+                                    div()
+                                        .id("detail-stats")
+                                        .min_w_0()
+                                        .truncate()
+                                        .when(!exact_time.is_empty(), |el| {
+                                            el.tooltip(move |window, cx| {
+                                                gpui_component::tooltip::Tooltip::new(
+                                                    exact_time.clone(),
                                                 )
-                                                .when(
-                                                    created_time.is_some()
-                                                        && updated_time.is_some(),
-                                                    |row| {
-                                                        row.child(
-                                                            div()
-                                                                .flex_shrink_0()
-                                                                .text_color(theme.border)
-                                                                .child("·"),
-                                                        )
-                                                    },
-                                                )
-                                                .when_some(
-                                                    updated_time.clone(),
-                                                    |row, (updated, tooltip)| {
-                                                        row.child(
-                                                            div()
-                                                                .id("detail-updated-time")
-                                                                .flex_shrink_0()
-                                                                .child(updated)
-                                                                .tooltip(move |window, cx| {
-                                                                    gpui_component::tooltip::Tooltip::new(
-                                                                        tooltip.clone(),
-                                                                    )
-                                                                    .build(window, cx)
-                                                                }),
-                                                        )
-                                                    },
-                                                ),
-                                        ),
+                                                .build(window, cx)
+                                            })
+                                        })
+                                        .child(stats.join(" · ")),
                                 )
-                            }),
-                    ),
+                            })
+                    }),
             )
             .child(if detail.loading {
                 h_flex()
@@ -3830,14 +3985,58 @@ impl Workbench {
                     .child(Spinner::new().small())
                     .child(div().text_size(FONT_BODY).child("Loading session…"))
                     .into_any_element()
+            } else if let Some(reason) = detail.error.clone() {
+                let reveal_path = detail.meta.file_path.clone();
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
+                    .px(SPACE_MD)
+                    .pb(SPACE_MD)
+                    .child(
+                        v_flex()
+                            .w(px(380.))
+                            .p(SPACE_XXL)
+                            .gap(SPACE_MD)
+                            .items_center()
+                            .rounded(theme.radius_lg)
+                            .bg(theme.popover)
+                            .child(empty_state(
+                                "icons/circle-x.svg",
+                                px(58.),
+                                px(26.),
+                                "Couldn't open this session",
+                                reason,
+                                cx,
+                            ))
+                            .child(
+                                Button::new("detail-error-reveal")
+                                    .outline()
+                                    .small()
+                                    .rounded(RADIUS_BUTTON)
+                                    .icon(icon("icons/folder.svg").with_size(px(13.)))
+                                    .label(REVEAL_IN_FM)
+                                    .on_click(move |_, _, _| {
+                                        terminal::reveal_in_file_manager(&reveal_path);
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
             } else {
                 let entity = cx.entity().downgrade();
                 div()
                     .flex_1()
                     .min_h_0()
-                    .bg(theme.popover)
-                    .relative()
+                    .px(SPACE_MD)
+                    .pb(SPACE_MD)
                     .child(
+                        div()
+                            .size_full()
+                            .rounded(theme.radius_lg)
+                            .bg(theme.popover)
+                            .relative()
+                            .child(
                         gpui::list(detail.msg_list.clone(), move |ix, window, cx| {
                             entity
                                 .upgrade()
@@ -3846,9 +4045,10 @@ impl Workbench {
                                 })
                                 .unwrap_or_else(|| div().into_any_element())
                         })
-                        .size_full(),
+                                .size_full(),
+                            )
+                            .vertical_scrollbar(&detail.msg_list),
                     )
-                    .vertical_scrollbar(&detail.msg_list)
                     .into_any_element()
             })
             .into_any_element()
@@ -4010,7 +4210,7 @@ fn usage_bar_row(
     let theme = cx.theme();
     let frac = (count as f32 / max.max(1) as f32).clamp(0., 1.);
     h_flex()
-        .h(px(22.))
+        .h(SPACE_XXL)
         .gap(SPACE_SM)
         .items_center()
         .when_some(lead, |row, lead| {
@@ -4172,7 +4372,7 @@ fn render_distribution(range: InsightsRange, values: &[i64], peak: usize, cx: &A
                         .id(("dist", i))
                         .flex_1()
                         .h(height)
-                        .rounded(px(2.))
+                        .rounded(RADIUS_CELL)
                         .bg(bg)
                         .tooltip(move |window, cx| {
                             gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
@@ -4296,7 +4496,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
                 div()
                     .id(("hm", ix))
                     .size(px(CELL))
-                    .rounded(px(2.))
+                    .rounded(RADIUS_CELL)
                     .bg(heat_color(n))
                     // 只捕获 Copy 的 (start, ix, n),hover 到的那格才格式化
                     .tooltip(move |window, cx| {
@@ -4338,7 +4538,7 @@ fn render_heatmap(d: &InsightsData, cx: &App) -> AnyElement {
                 .flex_shrink_0()
                 .child("Less")
                 .children(std::iter::once(0.).chain(HEAT).map(|a: f32| {
-                    div().size(px(CELL)).rounded(px(2.)).bg(if a == 0. {
+                    div().size(px(CELL)).rounded(RADIUS_CELL).bg(if a == 0. {
                         theme.muted
                     } else {
                         theme.primary.opacity(a)
@@ -4416,6 +4616,265 @@ fn empty_state(
         .child(div().text_size(FONT_CAPTION).child(caption.into()))
 }
 
+/// markdown 里的一个块:ATX 标题单独切出来,其余内容整段留给 TextView。
+///
+/// 组件的标题渲染只有 `pb`、没有 `pt`(`Node::Heading`),标题上方的间距
+/// 等同于普通段距,层级读不出来;`TextViewStyle` 也无对应钩子。切出来后
+/// 上间距由外层 div 给。
+///
+/// 代价:一条消息拆成多个 TextView,跨块的文字选择会断在块边界。
+struct MdBlock {
+    /// Some(级别) = ATX 标题;None = 普通内容块
+    heading: Option<u8>,
+    text: String,
+}
+
+/// `#` 到 `######` 后面**跟空格**才是 ATX 标题;`#hashtag` 不是
+fn atx_level(line: &str) -> Option<u8> {
+    let hashes = line.bytes().take_while(|b| *b == b'#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    match line.as_bytes().get(hashes) {
+        Some(b' ') => Some(hashes as u8),
+        _ => None,
+    }
+}
+
+fn split_markdown_blocks(src: &str) -> Vec<MdBlock> {
+    let mut out: Vec<MdBlock> = Vec::new();
+    let mut buf = String::new();
+    // 围栏代码块里的 `# ` 是注释不是标题,必须跟踪开合状态
+    let mut fence: Option<String> = None;
+
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if let Some(marker) = &fence {
+            if trimmed.starts_with(marker.as_str()) {
+                fence = None;
+            }
+        } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = Some(trimmed[..3].to_string());
+        }
+
+        match fence.is_none().then(|| atx_level(trimmed)).flatten() {
+            Some(level) => {
+                if !buf.trim().is_empty() {
+                    out.push(MdBlock {
+                        heading: None,
+                        text: std::mem::take(&mut buf),
+                    });
+                }
+                buf.clear();
+                out.push(MdBlock {
+                    heading: Some(level),
+                    text: line.to_string(),
+                });
+            }
+            None => {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+    }
+    if !buf.trim().is_empty() {
+        out.push(MdBlock {
+            heading: None,
+            text: buf,
+        });
+    }
+    out
+}
+
+/// 标题与上文之间的间距,按层级递减。见 `MdBlock`。
+fn heading_top_gap(level: u8) -> Pixels {
+    match level {
+        1 => px(30.),
+        2 => px(25.),
+        3 => px(20.),
+        _ => px(16.),
+    }
+}
+
+/// 一条助手消息的正文:按标题切块后逐块渲染,标题块由外层 div 控制上下间距。
+fn markdown_message(
+    seq: i64,
+    text: &str,
+    base: Pixels,
+    dark: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let blocks = split_markdown_blocks(text);
+    let mut col = v_flex().w_full().min_w_0();
+    for (ix, block) in blocks.into_iter().enumerate() {
+        let id: SharedString = format!("dmsg-{seq}-{ix}").into();
+        let body = markdown_body(id, block.text, base, dark, window, cx);
+        col = match block.heading {
+            // 消息以标题开头时不留上间距,否则会看起来与上一条消息断开
+            Some(level) => col.child(
+                div()
+                    .when(ix > 0, |el| el.pt(heading_top_gap(level)))
+                    .pb(px(3.))
+                    .child(body),
+            ),
+            None => col.child(body),
+        };
+    }
+    col
+}
+
+/// 对话正文的 markdown 视图,用户气泡与助手平铺共用。组件已内置 table /
+/// blockquote / divider / 标题分级 / tree-sitter 高亮,这里只做样式覆写。
+fn markdown_body(
+    id: SharedString,
+    text: String,
+    base: Pixels,
+    dark: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> TextView {
+    let code_bg = crate::theme::panel_bg(dark);
+    let code_border = crate::theme::panel_border(dark);
+    // id 必须带深浅模式。TextView 只在首次 request_layout 时同步解析,
+    // 之后 style 变化走异步通道(200ms debounce + 后台重解析),而语法高亮
+    // 的颜色是解析阶段固化进 `CodeBlock.styles` 的——不换 id 就要慢一拍
+    // 才变色。id 变则被视作新元素,走首次的同步解析路径。
+    let id: SharedString = format!("{id}-{}", if dark { "d" } else { "l" }).into();
+    TextView::markdown(id, text, window, cx)
+        .style(
+            TextViewStyle {
+                heading_base_font_size: base,
+                paragraph_gap: gpui::rems(PROSE_PARAGRAPH_GAP),
+                is_dark: dark,
+                // 必须显式给:默认值恒为 light;且 `TextViewStyle` 的
+                // PartialEq 只比较 paragraph_gap / heading_base_font_size /
+                // highlight_theme,不换它则深浅切换后 style 被判定相等、
+                // 组件不重建,代码块会留着上一个主题的配色
+                highlight_theme: if dark {
+                    HighlightTheme::default_dark().clone()
+                } else {
+                    HighlightTheme::default_light().clone()
+                },
+                ..Default::default()
+            }
+            // 对话里的标题不该有网页 h1 的体量(组件默认是正文的近两倍),
+            // 但差得太小又会混进正文
+            .heading_font_size(|level, base| match level {
+                1 => base * 1.45,
+                2 => base * 1.28,
+                3 => base * 1.14,
+                4 => base * 1.05,
+                _ => base,
+            })
+            .code_block(
+                StyleRefinement::default()
+                    .bg(code_bg)
+                    .border_1()
+                    .border_color(code_border)
+                    .rounded(RADIUS_PANEL)
+                    .px(px(15.))
+                    .py(px(13.)),
+            ),
+        )
+        // 组件把 actions 绝对定位在块内右上角,做不了横跨顶部的工具栏,
+        // 所以语言名与复制合成一个胶囊
+        .code_block_actions(|block, _window, cx| {
+            let theme = cx.theme();
+            let code = block.code();
+            h_flex()
+                .gap(SPACE_SM)
+                .items_center()
+                .px(px(6.))
+                .text_size(FONT_LABEL)
+                .text_color(theme.muted_foreground)
+                .when_some(block.lang(), |el, lang| el.child(div().child(lang)))
+                .child(
+                    div()
+                        .id("code-copy")
+                        .cursor_pointer()
+                        .rounded(RADIUS_BADGE)
+                        .child(icon("icons/copy.svg").with_size(px(12.)))
+                        .tooltip(|window, cx| {
+                            gpui_component::tooltip::Tooltip::new("Copy code").build(window, cx)
+                        })
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()));
+                        }),
+                )
+        })
+        .selectable(true)
+}
+
+/// thinking 折叠面板。收起时头行给一句摘要,展开是完整原文。
+fn think_panel(
+    ix: usize,
+    text: &str,
+    expanded: bool,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    let dark = theme.mode.is_dark();
+    let mut panel = v_flex()
+        .w_full()
+        .min_w_0()
+        .rounded(RADIUS_PANEL)
+        .bg(crate::theme::panel_bg(dark))
+        .border_1()
+        .border_color(crate::theme::panel_border(dark))
+        .child(
+            h_flex()
+                .id(("think", ix))
+                .w_full()
+                .min_w_0()
+                .px(px(13.))
+                .py(px(9.))
+                .gap(px(7.))
+                .items_center()
+                .cursor_pointer()
+                .text_size(FONT_MSG_THINKING)
+                .text_color(theme.muted_foreground)
+                .hover(|s| s.text_colored(theme.foreground, FONT_MSG_THINKING))
+                .child(
+                    icon("icons/chevron-right.svg")
+                        .with_size(px(11.))
+                        .flex_shrink_0()
+                        .when(expanded, |ic| {
+                            ic.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
+                        }),
+                )
+                .child(div().flex_shrink_0().font_medium().child("Thinking"))
+                // 展开后正文就在下面,头行不再重复
+                .when(!expanded, |el| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .italic()
+                            .child(one_line(text, 160)),
+                    )
+                })
+                .on_click(on_toggle),
+        );
+    if expanded {
+        panel = panel.child(
+            div()
+                .w_full()
+                .min_w_0()
+                // 对齐头行文字起点:13 + 11(图标) + 7(gap)
+                .pl(px(31.))
+                .pr(px(13.))
+                .pb(px(13.))
+                .text_size(FONT_MSG_THINKING)
+                .line_height(relative(1.75))
+                .text_color(theme.muted_foreground)
+                .child(text.to_string()),
+        );
+    }
+    panel
+}
+
 /// 对话区居中小胶囊(System 消息 / Context compacted)
 fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
     let theme = cx.theme();
@@ -4433,120 +4892,230 @@ fn centered_pill(text: impl Into<SharedString>, cx: &App) -> Div {
     )
 }
 
-/// 工具调用折叠簇:头行(chevron + 名字序列 + 失败计数)默认收起,
-/// 展开为左竖线缩进列表;仅失败项内联输出(错误才是回顾重点)。
+/// 工具输入输出在折叠体里的展示上限。不用内嵌滚动:嵌套滚动区在虚拟
+/// 列表行里会抢滚轮。
+const TOOL_OUTPUT_LIMIT: usize = 600;
+
+/// 工具调用折叠卡。头行 = chevron + 名称 + 参数摘要 + 结果徽标,
+/// 展开后逐条给出输入与输出(成功的调用也给)。
 fn tool_cluster(
     ix: usize,
     calls: &[ToolCallView],
+    arg_cells: usize,
     expanded: bool,
     on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     cx: &App,
 ) -> Div {
     let theme = cx.theme();
+    let dark = theme.mode.is_dark();
+    let panel_border = crate::theme::panel_border(dark);
     let failed = calls.iter().filter(|c| c.is_error).count();
-    let names = calls
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect::<Vec<_>>()
-        .join(" · ");
-    let head_label = if calls.len() == 1 {
-        names.clone()
-    } else {
-        format!("{} tools · {}", calls.len(), names)
-    };
     let mono = theme.mono_font_family.clone();
 
-    let mut cluster = v_flex().w_full().min_w_0().gap(px(4.)).child(
-        h_flex()
-            .id(("tool-cluster", ix))
-            .w_full()
-            .min_w_0()
-            .gap(px(6.))
-            .cursor_pointer()
-            .text_size(FONT_CAPTION)
-            .text_color(theme.muted_foreground)
-            .hover(|s| s.text_colored(theme.foreground, FONT_CAPTION))
-            .child(
-                icon("icons/chevron-right.svg")
-                    .with_size(px(11.))
-                    .flex_shrink_0()
-                    .when(expanded, |ic| {
-                        ic.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
-                    }),
-            )
-            .child(div().min_w_0().truncate().font_medium().child(head_label))
-            .when(failed > 0, |this| {
-                this.child(
+    // 单条给"名称 + 参数";多条给数量与名字序列,参数留到展开后逐条看
+    let (head_name, head_arg) = if let [only] = calls {
+        (
+            only.name.clone(),
+            Some(clip_display(&only.input_preview, arg_cells)),
+        )
+    } else {
+        let names = calls
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        (
+            format!("{} tool calls", calls.len()),
+            Some(clip_display(&names, arg_cells)),
+        )
+    };
+
+    let mut cluster = v_flex()
+        .w_full()
+        .min_w_0()
+        .rounded(RADIUS_PANEL)
+        .bg(crate::theme::panel_bg(dark))
+        .border_1()
+        .border_color(panel_border)
+        .child(
+            h_flex()
+                .id(("tool-cluster", ix))
+                .w_full()
+                .min_w_0()
+                .px(px(13.))
+                .py(px(9.))
+                .gap(px(7.))
+                .items_center()
+                .cursor_pointer()
+                .text_size(FONT_MSG_THINKING)
+                .text_color(theme.muted_foreground)
+                .hover(|s| s.text_colored(theme.foreground, FONT_MSG_THINKING))
+                .child(
+                    icon("icons/chevron-right.svg")
+                        .with_size(px(11.))
+                        .flex_shrink_0()
+                        .when(expanded, |ic| {
+                            ic.rotate(gpui::Radians(std::f32::consts::FRAC_PI_2))
+                        }),
+                )
+                .child(
                     div()
                         .flex_shrink_0()
-                        .text_color(theme.danger)
-                        .child(format!("{failed} failed")),
+                        .font_medium()
+                        .text_color(theme.foreground)
+                        .child(head_name),
                 )
-            })
-            .on_click(on_toggle),
-    );
+                .when_some(head_arg, |el, arg| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .font_family(mono.clone())
+                            .text_size(FONT_MSG_MONO)
+                            .child(arg),
+                    )
+                })
+                // 结果徽标常驻,不展开也知道有没有失败
+                .child(div().flex_1())
+                .when(failed > 0, |this| {
+                    this.child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(7.))
+                            .rounded(RADIUS_BADGE)
+                            .text_size(FONT_LABEL)
+                            .text_color(theme.danger)
+                            .bg(theme.danger.opacity(0.12))
+                            .child(format!("{failed} failed")),
+                    )
+                })
+                .on_click(on_toggle),
+        );
+
     if expanded {
         let mut items = v_flex()
             .w_full()
             .min_w_0()
-            .ml(px(5.))
-            .pl(px(12.))
-            .border_l_1()
-            .border_color(theme.border)
-            .gap(px(6.));
-        for tc in calls {
-            let mut item = v_flex().w_full().min_w_0().gap(px(2.)).child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap(px(6.))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(FONT_CAPTION)
-                            .font_medium()
-                            .text_color(if tc.is_error {
-                                theme.danger
-                            } else {
-                                theme.foreground
-                            })
-                            .child(tc.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(FONT_MSG_THINKING)
-                            .font_family(mono.clone())
-                            .text_color(theme.muted_foreground)
-                            .child(tc.input_preview.clone()),
-                    ),
-            );
-            if tc.is_error {
-                if let Some(out) = &tc.output {
-                    let shown: String = out.trim().chars().take(400).collect();
-                    if !shown.is_empty() {
-                        item = item.child(
+            .border_t_1()
+            .border_color(panel_border);
+        for (n, tc) in calls.iter().enumerate() {
+            let mut item = v_flex()
+                .w_full()
+                .min_w_0()
+                .px(px(13.))
+                .py(px(10.))
+                .gap(px(6.))
+                // 同一簇内多条之间用发丝线分隔,首条不画(卡片自己的顶边已在)
+                .when(n > 0, |el| el.border_t_1().border_color(panel_border));
+            // 单条时头行已给过名称
+            if calls.len() > 1 {
+                item = item.child(
+                    h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .gap(px(7.))
+                        .child(
                             div()
-                                .w_full()
+                                .flex_shrink_0()
+                                .text_size(FONT_MSG_THINKING)
+                                .font_medium()
+                                .text_color(if tc.is_error {
+                                    theme.danger
+                                } else {
+                                    theme.foreground
+                                })
+                                .child(tc.name.clone()),
+                        )
+                        .child(
+                            div()
                                 .min_w_0()
-                                .px(px(8.))
-                                .py(px(5.))
-                                .rounded(RADIUS_KBD)
-                                .bg(theme.muted)
-                                .text_size(FONT_LABEL)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(FONT_MSG_MONO)
                                 .font_family(mono.clone())
                                 .text_color(theme.muted_foreground)
-                                .child(shown),
-                        );
-                    }
-                }
+                                .child(clip_display(&tc.input_preview, arg_cells)),
+                        ),
+                );
+            }
+            // 优先给完整 input
+            let input = tc
+                .input
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| clip_chars(s, TOOL_OUTPUT_LIMIT));
+            if let Some(input) = input {
+                item = item.child(tool_section("Input", input, false, mono.clone(), cx));
+            }
+            if let Some(out) = tc
+                .output
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                item = item.child(tool_section(
+                    "Output",
+                    clip_chars(out, TOOL_OUTPUT_LIMIT),
+                    tc.is_error,
+                    mono.clone(),
+                    cx,
+                ));
             }
             items = items.child(item);
         }
         cluster = cluster.child(items);
     }
     cluster
+}
+
+/// 按码点截断,截断时补省略号
+fn clip_chars(s: &str, limit: usize) -> String {
+    let mut out: String = s.chars().take(limit).collect();
+    if s.chars().nth(limit).is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// 工具卡展开体里的一段(Input / Output)。失败的输出走 danger 色。
+fn tool_section(
+    label: &'static str,
+    body: String,
+    is_error: bool,
+    mono: SharedString,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .w_full()
+        .min_w_0()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(FONT_LABEL)
+                .text_color(theme.muted_foreground)
+                .child(label),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(RADIUS_KBD)
+                .bg(crate::theme::inline_code_bg(theme.mode.is_dark()))
+                .text_size(FONT_MSG_MONO)
+                .line_height(relative(1.65))
+                .font_family(mono)
+                .text_color(if is_error {
+                    theme.danger
+                } else {
+                    theme.muted_foreground
+                })
+                .child(body),
+        )
 }
 
 /// 小胶囊 badge(项目名/model/source 共用):4px 圆角,内部截断。
@@ -4562,6 +5131,15 @@ fn custom_owner<'a>(
         .iter()
         .find(|(a, p)| *a == agent && path_owns(p.as_ref(), root))
         .map(|(_, p)| p)
+}
+
+/// 元信息带里的分隔点。DESIGN.md 规定分隔符是前后带空格的 ` · `;这里
+/// 走 flex gap 排版,所以只画点本身,前后空隙由 gap 给
+fn meta_sep(color: Hsla) -> Div {
+    div()
+        .flex_shrink_0()
+        .text_color(color.opacity(0.55))
+        .child("·")
 }
 
 fn badge(name: impl Into<SharedString>, bg: Hsla, fg: Hsla) -> impl IntoElement {

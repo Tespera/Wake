@@ -82,12 +82,53 @@ fn c(hex: u32) -> Hsla {
     .into()
 }
 
-/// 详情页 model badge 色——用户指定的 Claude 橙(非 agent 语义,纯配色选择);
-/// outline badge 形态,两模式通用
-pub const MODEL_BADGE_BG: u32 = 0xD97757;
-
 /// 收藏星选中色——macOS systemYellow(Finder/Mail 星标惯例),两模式通用
 pub const STAR_YELLOW: u32 = 0xFFCC00;
+
+/// 会话流日期组头的竖条色。比 agent 品牌橙更亮更饱和,避免读成身份标记
+/// ——它标的是时间分组。两模式通用
+pub const DATE_GROUP_ACCENT: u32 = 0xFF8A3D;
+
+// ---------------- 对话区专用材质 ----------------
+// 阅读卡内需要几档比 `muted` 更暖、彼此可分的面:直接复用 `theme.muted`
+// 的话,气泡里嵌代码块时两者同色、边界消失。随深浅模式变,故为函数。
+
+/// 用户气泡底
+pub fn bubble_bg(dark: bool) -> Hsla {
+    if dark {
+        c(0x37362F)
+    } else {
+        c(0xEDEBE3)
+    }
+}
+
+/// thinking / 工具卡 / 代码块的面
+pub fn panel_bg(dark: bool) -> Hsla {
+    if dark {
+        c(0x232321)
+    } else {
+        c(0xF4F3ED)
+    }
+}
+
+/// 面板与代码块的描边(极淡,只为在同色系里划出边界)
+pub fn panel_border(dark: bool) -> Hsla {
+    if dark {
+        ca(0xFFFFFF, 0.07)
+    } else {
+        ca(0x000000, 0.055)
+    }
+}
+
+/// 行内代码底,与 `theme.accent` 同值(TextView 写死取 accent,这里供
+/// 工具卡等自绘处用)。比 panel 再淡一档,免得中文段落里连着几个成斑块
+pub fn inline_code_bg(dark: bool) -> Hsla {
+    if dark {
+        c(0x3B3830)
+    } else {
+        c(0xF1EFE8)
+    }
+}
 
 /// 在 gpui-component 默认主题之上覆写 Wake 的 token。
 /// 每次外观切换后都要重新调用(sync_system_appearance 会重置为默认)。
@@ -119,7 +160,9 @@ pub fn apply_wake_theme(cx: &mut App) {
 
         theme.muted = c(0x323230);
         theme.muted_foreground = c(0xA9A8A2);
-        theme.accent = c(0x383836);
+        // accent 同时是 TextView 里行内代码的底色(组件 node.rs:651 写死
+        // 取它,没有单独钩子),故与 inline_code_bg 取同一档暖色
+        theme.accent = c(0x3B3830);
         theme.accent_foreground = c(0xF4F3F0);
 
         theme.primary = c(0x4C8DFF);
@@ -181,7 +224,8 @@ pub fn apply_wake_theme(cx: &mut App) {
 
         theme.muted = c(0xE8E8E5);
         theme.muted_foreground = c(0x686761);
-        theme.accent = c(0xE7E7E3);
+        // 同深色分支:accent 也是行内代码底色
+        theme.accent = c(0xF1EFE8);
         theme.accent_foreground = c(0x1D1D1F);
 
         theme.primary = c(0x0A84FF);

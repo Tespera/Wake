@@ -1,36 +1,33 @@
-use chrono::{DateTime, Datelike, Duration, Local, TimeZone};
+use chrono::{Local, TimeZone};
 
-/// 会话时间的渐进式展示：越近越强调新鲜度，越远越强调日期锚点。
-pub fn smart_time(ts: i64) -> String {
-    smart_time_from(ts, &Local::now())
-}
-
-fn smart_time_from(ts: i64, now: &DateTime<Local>) -> String {
+/// 详情页时间信息：保留到秒，避免相对时间丢失会话的精确时间上下文。
+/// 列表与元信息带用的紧凑相对时间。扫读锚点要短:会话流第二行要同时
+/// 放下 agent 图标、项目 chip、消息数,`23 min ago` 这类长形式只能从
+/// 项目名身上砍宽度。完整时间在 tooltip 里。
+pub fn relative_time(ts: i64) -> String {
     if ts <= 0 {
         return String::new();
     }
-
-    let Some(dt) = Local.timestamp_millis_opt(ts).single() else {
-        return String::new();
-    };
-    let diff = now.timestamp_millis() - ts;
+    let now = chrono::Utc::now().timestamp_millis();
+    let diff = now - ts;
     const MIN: i64 = 60_000;
-    if (0..MIN).contains(&diff) {
-        "Just now".to_string()
-    } else if (MIN..60 * MIN).contains(&diff) {
-        format!("{} min ago", diff / MIN)
-    } else if dt.date_naive() == now.date_naive() {
-        dt.format("%-I:%M %p").to_string()
-    } else if dt.date_naive() == now.date_naive() - Duration::days(1) {
-        "Yesterday".to_string()
-    } else if dt.year() == now.year() {
-        dt.format("%b %-d").to_string()
+    if diff < MIN {
+        "now".to_string()
+    } else if diff < 60 * MIN {
+        format!("{}m", diff / MIN)
+    } else if diff < 24 * 60 * MIN {
+        format!("{}h", diff / (60 * MIN))
+    } else if diff < 7 * 24 * 60 * MIN {
+        format!("{}d", diff / (24 * 60 * MIN))
     } else {
-        dt.format("%b %-d, %Y").to_string()
+        Local
+            .timestamp_millis_opt(ts)
+            .single()
+            .map(|d| d.format("%m-%d").to_string())
+            .unwrap_or_default()
     }
 }
 
-/// 详情页时间信息：保留到秒，避免相对时间丢失会话的精确时间上下文。
 pub fn abs_date(ts: i64) -> String {
     if ts <= 0 {
         return String::new();
@@ -130,6 +127,40 @@ pub fn expand_tilde(p: &str) -> String {
     }
 }
 
+/// 按显示宽度截断并补省略号。CJK / 全角记 2 格,其余记 1 格。
+///
+/// 代替 gpui 的 `truncate()`:后者只在布局时拿到 `known_dimensions.width`
+/// 或 `AvailableSpace::Definite` 才画省略号(`elements/text.rs:357`),
+/// 虚拟列表行与 flex 子项都拿不到,文字会按 max-content 铺开再被
+/// `overflow_hidden` 硬裁在半个字上。
+pub fn clip_display(s: &str, cells: usize) -> String {
+    let width = |c: char| {
+        if (c as u32) >= 0x1100 && !c.is_ascii() {
+            2
+        } else {
+            1
+        }
+    };
+    let total: usize = s.chars().map(width).sum();
+    if total <= cells {
+        return s.to_string();
+    }
+    // `…` 是全角,占两格;只留一格会让结果超出容器、省略号被裁掉
+    let budget = cells.saturating_sub(2);
+    let mut used = 0;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = width(c);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 /// 首行截断预览
 pub fn one_line(s: &str, max_chars: usize) -> String {
     let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -144,43 +175,47 @@ pub fn one_line(s: &str, max_chars: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod clip_tests {
+    use super::clip_display;
 
-    fn local_time(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Local> {
-        Local
-            .with_ymd_and_hms(year, month, day, hour, minute, 0)
-            .single()
-            .expect("test date should be unambiguous in the local timezone")
+    #[test]
+    fn keeps_short_text_untouched() {
+        assert_eq!(clip_display("hello", 20), "hello");
+        assert_eq!(clip_display("中文标题", 20), "中文标题");
     }
 
     #[test]
-    fn smart_time_uses_progressive_precision() {
-        let now = local_time(2026, 8, 26, 18, 0);
+    fn cjk_counts_as_two_cells() {
+        assert_eq!(clip_display("中文标题", 6), "中文…");
+    }
 
-        assert_eq!(
-            smart_time_from((now - Duration::seconds(30)).timestamp_millis(), &now),
-            "Just now"
-        );
-        assert_eq!(
-            smart_time_from((now - Duration::minutes(23)).timestamp_millis(), &now),
-            "23 min ago"
-        );
-        assert_eq!(
-            smart_time_from(local_time(2026, 8, 26, 15, 42).timestamp_millis(), &now),
-            "3:42 PM"
-        );
-        assert_eq!(
-            smart_time_from(local_time(2026, 8, 25, 12, 0).timestamp_millis(), &now),
-            "Yesterday"
-        );
-        assert_eq!(
-            smart_time_from(local_time(2026, 8, 21, 12, 0).timestamp_millis(), &now),
-            "Aug 21"
-        );
-        assert_eq!(
-            smart_time_from(local_time(2025, 8, 21, 12, 0).timestamp_millis(), &now),
-            "Aug 21, 2025"
-        );
+    #[test]
+    fn ascii_counts_as_one_cell() {
+        assert_eq!(clip_display("abcdefgh", 5), "abc…");
+    }
+
+    #[test]
+    fn never_splits_a_char() {
+        // 省略号 2 格 + 内容 3 格,第二个汉字放不下
+        assert_eq!(clip_display("中文标题", 5), "中…");
+    }
+
+    #[test]
+    fn reserves_room_for_the_ellipsis() {
+        let width = |s: &str| -> usize {
+            s.chars()
+                .map(|c| {
+                    if (c as u32) >= 0x1100 && !c.is_ascii() {
+                        2
+                    } else {
+                        1
+                    }
+                })
+                .sum()
+        };
+        for cells in 4..40 {
+            assert!(width(&clip_display("一二三四五六七八九十", cells)) <= cells);
+            assert!(width(&clip_display("abcdefghijklmnopqrst", cells)) <= cells);
+        }
     }
 }
