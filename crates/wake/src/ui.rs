@@ -195,6 +195,22 @@ pub const RADIUS_BUTTON: Pixels = px(6.);
 pub const RADIUS_KBD: Pixels = px(5.);
 /// 小胶囊 badge(项目名 / model / source / 各处计数共用)
 pub const RADIUS_BADGE: Pixels = px(4.);
+
+// ---------------- 内联图片 ----------------
+
+/// 缩略图边长。统一正方形网格——原始宽高比五花八门,按比例排会参差不齐;
+/// 正方形让多图消息永远是规整的一行/一格。正文里的图只作**入口**,
+/// 要看清楚点开原图
+pub const IMAGE_THUMB: Pixels = px(104.);
+/// 气泡内图片的圆角(比气泡的 RADIUS_BUBBLE 收一档)
+pub const RADIUS_IMAGE: Pixels = px(10.);
+/// 一条消息内图片下标的编码基数(用于生成稳定的元素 id)。
+/// 单条消息不会有这么多图,取整十便于阅读 id
+pub const IMAGES_PER_MSG: usize = 64;
+/// 放大预览遮罩的黑色不透明度。gpui 没有背景模糊,压不深就分不清图的边界;
+/// 但压太深(0.86 试过)会闷。0.58 配上图片自己的发丝边与大投影,
+/// 底层界面还看得出结构、又不抢注意力
+pub const IMAGE_SCRIM: f32 = 0.58;
 /// 数据可视化里的小色块(热力图格子、柱条)。11px 的格子用 4px 圆角会显得
 /// 发圆、丢掉方格的读数感,单独一档
 pub const RADIUS_CELL: Pixels = px(2.);

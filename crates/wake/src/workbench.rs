@@ -572,6 +572,26 @@ struct DetailState {
     expanded_thinking: HashSet<usize>,
     /// 搜索跳转目标(FTS seq,契约=消息 seq);解析完成后滚到该消息并保持高亮
     jump_seq: Option<i64>,
+    /// 与 transcript 同下标的内联图片。解析时一次性建好 `Arc<Image>` 存住——
+    /// gpui 的 `Image` 按字节内容哈希做 id、解码结果有缓存,但每帧重建会把
+    /// 整块字节 clone 一遍,几 MB 的截图逐帧 memcpy 扛不住
+    images: Vec<Vec<ImageSlot>>,
+    /// 放大预览中的图:(消息下标, 该消息内的图片下标)
+    zoom: Option<(usize, usize)>,
+}
+
+/// 一张图在 UI 侧的两种状态。gpui 只认 `ImageFormat` 那七种格式,
+/// HEIC 之类解得出字节也渲染不了,给出说明而不是静默吞掉
+#[derive(Clone)]
+enum ImageSlot {
+    /// `dims` 是原始像素宽高。两个用处:正方形缩略图靠宽高比决定钉宽还是
+    /// 钉高(gpui 的 `img()` 没有 object-fit,cover 要自己做),放大预览的
+    /// 元信息也要显示它。解不出尺寸时为 None,按横图处理
+    Ready {
+        image: Arc<gpui::Image>,
+        dims: Option<(u32, u32)>,
+    },
+    Unsupported(SharedString),
 }
 
 // ---------------- Workbench ----------------
@@ -2240,6 +2260,8 @@ impl Workbench {
             expanded_tools: HashSet::new(),
             expanded_thinking: HashSet::new(),
             jump_seq,
+            images: Vec::new(),
+            zoom: None,
         });
         // 搜索路径:中栏列表同步选中并滚到该会话。
         // 列表点击路径(jump=None)不走——List 点击自带选中,再滚会跳视口
@@ -2262,7 +2284,7 @@ impl Workbench {
             let t = adapter
                 .parse_transcript(&r)
                 .map_err(|e| format!("Couldn't read this session file: {e}"))?;
-            let visible: Vec<TranscriptMessage> = t
+            let mut visible: Vec<TranscriptMessage> = t
                 .mainline
                 .into_iter()
                 .filter(|m| {
@@ -2270,17 +2292,38 @@ impl Workbench {
                         && (!m.text.trim().is_empty()
                             || !m.tool_calls.is_empty()
                             || m.thinking.is_some()
+                            || !m.images.is_empty()
                             || m.kind == MessageKind::CompactSummary)
                 })
                 .collect();
-            Ok((meta.key.clone(), visible))
+            // 字节 move 进 Arc<Image>,消息里那份同时清空——两处各留一份的话
+            // 一个图多的会话会白占一倍内存
+            let images: Vec<Vec<ImageSlot>> = visible
+                .iter_mut()
+                .map(|m| {
+                    std::mem::take(&mut m.images)
+                        .into_iter()
+                        .map(|a| match image_format_of(&a.media_type) {
+                            Some(f) => {
+                                let dims = image_dimensions(&a.bytes);
+                                ImageSlot::Ready {
+                                    image: Arc::new(gpui::Image::from_bytes(f, a.bytes)),
+                                    dims,
+                                }
+                            }
+                            None => ImageSlot::Unsupported(a.media_type.into()),
+                        })
+                        .collect()
+                })
+                .collect();
+            Ok((meta.key.clone(), visible, images))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             this.update_in(cx, |this, _window, cx| {
                 if let Some(detail) = &mut this.detail {
                     match result {
-                        Ok((key, messages)) if key == detail.meta.key => {
+                        Ok((key, messages, images)) if key == detail.meta.key => {
                             detail.msg_list = gpui::ListState::new(
                                 messages.len(),
                                 gpui::ListAlignment::Bottom,
@@ -2301,6 +2344,8 @@ impl Workbench {
                                 }
                             }
                             detail.transcript = Rc::new(messages);
+                            detail.images = images;
+                            detail.zoom = None;
                             detail.loading = false;
                         }
                         // key 不匹配 = 已切走,这一轮结果作废
@@ -3087,6 +3132,196 @@ impl Workbench {
             })
     }
 
+    /// 放大预览。铺满窗口、压在对话区之上但在 dialog 层之下——
+    /// 它不是模态流程,只是"把这张图看清楚",点背景即走。
+    ///
+    /// 两处必须这么写:
+    /// - `occlude()`:gpui 的命中测试会一路派发给所有边界命中的元素,
+    ///   不阻断的话遮罩底下的列表和按钮照样能点到。
+    /// - 图片的**大投影**:gpui 没有背景模糊(`blur_radius` 只属于
+    ///   box-shadow,`window.blur()` 是焦点失焦),遮罩又压得浅,
+    ///   只能靠投影把图从背景里浮起来。
+    fn render_image_zoom(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((mi, ii)) = self.detail.as_ref().and_then(|d| d.zoom) else {
+            return div().into_any_element();
+        };
+        let Some(ImageSlot::Ready { image, dims }) = self
+            .detail
+            .as_ref()
+            .and_then(|d| d.images.get(mi))
+            .and_then(|v| v.get(ii))
+            .cloned()
+        else {
+            return div().into_any_element();
+        };
+        let meta_line = {
+            let kind = image
+                .format
+                .mime_type()
+                .trim_start_matches("image/")
+                .to_uppercase();
+            let size = crate::format::human_bytes(image.bytes.len());
+            match dims {
+                Some((w, h)) => format!("{kind} · {w} × {h} · {size}"),
+                None => format!("{kind} · {size}"),
+            }
+        };
+        // 显示尺寸必须由我们自己算:gpui 的 `img()` 只在"宽 Auto + 高为绝对值"
+        // 时才按 aspect_ratio 反推另一边,交给 flex 撑的话布局盒会大于实际
+        // 绘制的图(gpui 在盒内按 contain 画),描边就贴不住图的边缘。
+        // 尺寸读不出来时退回一个保守的方框,总比描一个错位的框好
+        let shown = zoom_fit(dims, window.viewport_size());
+
+        // 背景与关闭钮各要一个:cx.listener 返回的闭包不可 Clone
+        let close_backdrop = cx.listener(|this: &mut Self, _, _window, cx| {
+            if let Some(detail) = &mut this.detail {
+                detail.zoom = None;
+                cx.notify();
+            }
+        });
+        let close_button = cx.listener(|this: &mut Self, _, _window, cx| {
+            if let Some(detail) = &mut this.detail {
+                detail.zoom = None;
+                cx.notify();
+            }
+        });
+        let copy_image = image.clone();
+        let save_image = image.clone();
+        // 遮罩上的图标钮:底色透明、hover 才出胶囊。它们坐在**有实底的容器**
+        // 里(胶囊 / 关闭钮自己),所以不必像散点那样常驻描边
+        let ico = |id: &'static str, path: &'static str| {
+            h_flex()
+                .id(id)
+                .size(px(30.))
+                .items_center()
+                .justify_center()
+                .rounded(RADIUS_BUTTON)
+                .hover(|s| s.bg(gpui::white().opacity(0.16)))
+                .cursor_pointer()
+                .child(
+                    icon(path)
+                        .size(px(15.))
+                        .text_color(gpui::white().opacity(0.82)),
+                )
+        };
+        div()
+            .id("image-zoom")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui::black().opacity(IMAGE_SCRIM))
+            // 点背景关闭。图片、胶囊、关闭钮各自吞掉点击,不会误关
+            .on_click(close_backdrop)
+            .child(
+                v_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .gap(SPACE_XL)
+                    .px(px(56.))
+                    .py(px(52.))
+                    .child(
+                        gpui::img(image)
+                            .id("image-zoom-fig")
+                            .w(shown.width)
+                            .h(shown.height)
+                            .rounded(SPACE_SM)
+                            // 投影给图落地感。不描边:白底截图在 58% 遮罩上
+                            // 对比已经够,那圈亮边反而像给图套了个框
+                            .shadow(vec![zoom_shadow(px(18.), px(48.), 0.45)])
+                            .on_click(|_, _, _| {}),
+                    )
+                    // 元信息与动作收进一个胶囊:有底、有边、有投影,读作一组
+                    .child(
+                        h_flex()
+                            .id("image-zoom-bar")
+                            .flex_shrink_0()
+                            .h(px(40.))
+                            .pl(SPACE_LG)
+                            .pr(SPACE_SM)
+                            .gap(SPACE_SM)
+                            .items_center()
+                            .rounded(px(20.))
+                            .bg(crate::theme::ZOOM_PILL_BG)
+                            .border_1()
+                            .border_color(gpui::white().opacity(0.11))
+                            .shadow(vec![zoom_shadow(px(8.), px(26.), 0.35)])
+                            .on_click(|_, _, _| {})
+                            .child(
+                                div()
+                                    .text_size(FONT_LABEL)
+                                    .text_color(gpui::white().opacity(0.58))
+                                    .child(meta_line),
+                            )
+                            .child(div().w(px(1.)).h(px(16.)).bg(gpui::white().opacity(0.16)))
+                            .child(
+                                ico("image-copy", "icons/copy.svg")
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new("Copy image")
+                                            .build(window, cx)
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_image(
+                                            &copy_image,
+                                        ));
+                                        window.push_notification(
+                                            Notification::success("Image copied"),
+                                            cx,
+                                        );
+                                    }),
+                            )
+                            .child(
+                                ico("image-save", "icons/download.svg")
+                                    .tooltip(|window, cx| {
+                                        gpui_component::tooltip::Tooltip::new("Save to Downloads")
+                                            .build(window, cx)
+                                    })
+                                    .on_click(move |_, window, cx| {
+                                        match save_image_to_downloads(&save_image) {
+                                            Some(path) => window.push_notification(
+                                                Notification::success(format!(
+                                                    "Saved to {}",
+                                                    path.display()
+                                                )),
+                                                cx,
+                                            ),
+                                            None => window.push_notification(
+                                                Notification::error("Couldn't save the image"),
+                                                cx,
+                                            ),
+                                        }
+                                    }),
+                            ),
+                    ),
+            )
+            // 关闭独立在右上角:它是退出,不是"对这张图做点什么",
+            // 与胶囊里的两个动作分开
+            .child(
+                h_flex()
+                    .id("image-zoom-close")
+                    .absolute()
+                    .top(SPACE_LG)
+                    .right(SPACE_LG)
+                    .size(px(32.))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(9.))
+                    .bg(gpui::white().opacity(0.11))
+                    .hover(|s| s.bg(gpui::white().opacity(0.2)))
+                    .cursor_pointer()
+                    .tooltip(|window, cx| {
+                        gpui_component::tooltip::Tooltip::new("Close").build(window, cx)
+                    })
+                    .on_click(close_button)
+                    .child(
+                        icon("icons/x.svg")
+                            .size(px(15.))
+                            .text_color(gpui::white().opacity(0.85)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     // ---------- 对话区逐消息渲染(设计语言:用户右气泡 / 助手平铺 / 工具折叠簇) ----------
 
     /// gpui::list 的行渲染。在布局阶段经 entity.update 调用(render 已返回,
@@ -3108,6 +3343,9 @@ impl Workbench {
         // 尾部要用的 Copy 值提前取出,theme 借用不跨越 inner 构建期的 &mut cx
         let jump_bg = theme.primary.opacity(0.09);
         let jump_radius = theme.radius;
+        let img_border = crate::theme::panel_border(dark);
+        let img_panel = crate::theme::panel_bg(dark);
+        let img_muted = theme.muted_foreground;
         let Some(detail) = &self.detail else {
             return div().into_any_element();
         };
@@ -3117,6 +3355,9 @@ impl Workbench {
         let jump_seq = detail.jump_seq;
         // Rc 克隆只加引用计数;逐行借用,避免每帧深拷贝整条消息(text 可达 32KB)
         let transcript = detail.transcript.clone();
+        // 本行的图。克隆的是 Arc,不是字节;提前取出让 &self.detail 的借用
+        // 在元素构建之前结束(下面要 &mut cx)
+        let shots: Vec<ImageSlot> = detail.images.get(ix).cloned().unwrap_or_default();
         let Some(m) = transcript.get(ix) else {
             return div().into_any_element();
         };
@@ -3137,29 +3378,44 @@ impl Workbench {
         } else {
             match m.role {
                 // 角色靠形态区分:用户右对齐气泡,助手全宽平铺,不加文字标签
-                Role::User => h_flex()
-                    .w_full()
-                    .justify_end()
-                    .child(
-                        div()
-                            .max_w(BUBBLE_MAX_W)
-                            .min_w_0()
-                            .rounded(RADIUS_BUBBLE)
-                            .bg(crate::theme::bubble_bg(dark))
-                            .px(px(17.))
-                            .py(px(11.))
-                            .text_size(FONT_MSG_USER)
-                            .line_height(relative(LINE_HEIGHT_BUBBLE))
-                            .child(markdown_body(
-                                format!("dmsg-{}", m.seq).into(),
-                                m.text.clone(),
-                                FONT_MSG_USER,
-                                dark,
-                                window,
-                                cx,
-                            )),
-                    )
-                    .into_any_element(),
+                Role::User => {
+                    let has_text = !m.text.trim().is_empty();
+                    // 纯图消息把内边距收到 7px,让方格几乎撑满气泡;有文字时
+                    // 走常规内边距,图排在文字上方(贴图提问的原始顺序)
+                    let solo = !shots.is_empty() && !has_text;
+                    let mut bubble = div()
+                        .max_w(BUBBLE_MAX_W)
+                        .min_w_0()
+                        .rounded(RADIUS_BUBBLE)
+                        .bg(crate::theme::bubble_bg(dark))
+                        .text_size(FONT_MSG_USER)
+                        .line_height(relative(LINE_HEIGHT_BUBBLE));
+                    bubble = if solo {
+                        bubble.p(px(7.))
+                    } else {
+                        bubble.px(px(17.)).py(px(11.))
+                    };
+                    if !shots.is_empty() {
+                        let strip =
+                            image_strip(ix, &shots, img_border, img_panel, img_muted, cx.entity());
+                        bubble = bubble.child(if has_text { strip.mb(px(9.)) } else { strip });
+                    }
+                    if has_text {
+                        bubble = bubble.child(markdown_body(
+                            format!("dmsg-{}", m.seq).into(),
+                            m.text.clone(),
+                            FONT_MSG_USER,
+                            dark,
+                            window,
+                            cx,
+                        ));
+                    }
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .child(bubble)
+                        .into_any_element()
+                }
                 Role::Assistant => {
                     // thinking 卡 / 正文 / 工具卡之间的呼吸
                     let mut col = v_flex().w_full().min_w_0().gap(px(12.));
@@ -5135,6 +5391,142 @@ fn custom_owner<'a>(
 
 /// 元信息带里的分隔点。DESIGN.md 规定分隔符是前后带空格的 ` · `;这里
 /// 走 flex gap 排版,所以只画点本身,前后空隙由 gap 给
+/// jsonl 的 `media_type` → gpui 能渲染的格式。认不出来的(HEIC、AVIF 等)
+/// 返回 None,由调用方渲染成"无法解码"占位块
+/// 把图片落到下载目录。这张图在磁盘上只以 base64 存在于 jsonl 里,
+/// 没有这个入口用户就没有任何办法把它取出来。
+fn save_image_to_downloads(image: &gpui::Image) -> Option<std::path::PathBuf> {
+    let ext = match image.format {
+        gpui::ImageFormat::Png => "png",
+        gpui::ImageFormat::Jpeg => "jpg",
+        gpui::ImageFormat::Webp => "webp",
+        gpui::ImageFormat::Gif => "gif",
+        gpui::ImageFormat::Svg => "svg",
+        gpui::ImageFormat::Bmp => "bmp",
+        gpui::ImageFormat::Tiff => "tiff",
+    };
+    // 文件名取内容哈希:同一张图重复导出不会堆出一串 (1)(2)
+    let path = dirs::download_dir()?.join(format!("wake-image-{:016x}.{ext}", image.id()));
+    std::fs::write(&path, &image.bytes).ok()?;
+    Some(path)
+}
+
+/// 只读图片头拿原始宽高,不解整张
+/// 放大预览里的落地投影。gpui-component 的 `box_shadow` 助手在私有模块里,
+/// 直接构造 `BoxShadow`——只有纵向偏移,与实现无关的两个字段固定为 0
+/// 放大预览里图片的显示尺寸:等比缩放到可用区域内,**不放大**——
+/// 小图放大只会糊,原尺寸看得更清楚。可用区域 = 视口减去四周留白、
+/// 底部胶囊(40)与它上方的间距(20)
+fn zoom_fit(dims: Option<(u32, u32)>, viewport: Size<Pixels>) -> Size<Pixels> {
+    let avail_w = (f32::from(viewport.width) - 56. * 2.).max(120.);
+    let avail_h = (f32::from(viewport.height) - 52. * 2. - 40. - 20.).max(120.);
+    let Some((w, h)) = dims.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return gpui::size(px(avail_w.min(720.)), px(avail_h.min(480.)));
+    };
+    let (w, h) = (w as f32, h as f32);
+    let scale = (avail_w / w).min(avail_h / h).min(1.0);
+    gpui::size(px(w * scale), px(h * scale))
+}
+
+fn zoom_shadow(y: Pixels, blur: Pixels, alpha: f32) -> gpui::BoxShadow {
+    gpui::BoxShadow {
+        color: gpui::black().opacity(alpha),
+        offset: gpui::point(px(0.), y),
+        blur_radius: blur,
+        spread_radius: px(0.),
+    }
+}
+
+fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+fn image_format_of(media_type: &str) -> Option<gpui::ImageFormat> {
+    use gpui::ImageFormat as F;
+    Some(match media_type.trim().to_ascii_lowercase().as_str() {
+        "image/png" => F::Png,
+        "image/jpeg" | "image/jpg" => F::Jpeg,
+        "image/webp" => F::Webp,
+        "image/gif" => F::Gif,
+        "image/svg+xml" => F::Svg,
+        "image/bmp" => F::Bmp,
+        "image/tiff" | "image/tif" => F::Tiff,
+        _ => return None,
+    })
+}
+
+/// 用户气泡内的图片网格。统一 `IMAGE_THUMB` 见方,靠 `landscape` 决定钉高
+/// 还是钉宽、另一边溢出后由外层 `overflow_hidden` 居中裁掉——等价于
+/// CSS 的 `object-fit: cover`,gpui 的 `img()` 没有这个属性,只能这么做。
+fn image_strip(
+    msg_ix: usize,
+    slots: &[ImageSlot],
+    theme_border: Hsla,
+    panel: Hsla,
+    muted: Hsla,
+    workbench: Entity<Workbench>,
+) -> Div {
+    let mut row = h_flex().flex_wrap().gap(SPACE_SM);
+    for (i, slot) in slots.iter().enumerate() {
+        row = row.child(match slot {
+            ImageSlot::Ready { image, dims } => {
+                let wb = workbench.clone();
+                let fig = gpui::img(image.clone());
+                // 钉短边、长边溢出:横图钉高、竖图钉宽,两种都能填满方格。
+                // 尺寸读不出来时按横图处理(截屏基本都是宽大于高)
+                let landscape = dims.map(|(w, h)| w >= h).unwrap_or(true);
+                let fig = if landscape {
+                    fig.h(IMAGE_THUMB)
+                } else {
+                    fig.w(IMAGE_THUMB)
+                };
+                div()
+                    .id(("shot", msg_ix * IMAGES_PER_MSG + i))
+                    .size(IMAGE_THUMB)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .rounded(RADIUS_IMAGE)
+                    .border_1()
+                    .border_color(theme_border)
+                    .bg(panel)
+                    .cursor_pointer()
+                    .child(fig)
+                    .on_click(move |_, _window, cx| {
+                        wb.update(cx, |this, cx| {
+                            if let Some(detail) = &mut this.detail {
+                                detail.zoom = Some((msg_ix, i));
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .into_any_element()
+            }
+            ImageSlot::Unsupported(mt) => v_flex()
+                .size(IMAGE_THUMB)
+                .items_center()
+                .justify_center()
+                .gap(SPACE_XS)
+                .p(SPACE_SM)
+                .rounded(RADIUS_IMAGE)
+                .border_1()
+                .border_color(theme_border)
+                .bg(panel)
+                .text_size(FONT_LABEL)
+                .text_color(muted)
+                .child("无法解码")
+                .child(div().truncate().child(mt.clone()))
+                .into_any_element(),
+        });
+    }
+    row
+}
+
 fn meta_sep(color: Hsla) -> Div {
     div()
         .flex_shrink_0()
@@ -5360,6 +5752,7 @@ impl Render for Workbench {
                         }
                     }),
             )
+            .child(self.render_image_zoom(window, cx))
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }

@@ -85,6 +85,14 @@ fn c(hex: u32) -> Hsla {
 /// 收藏星选中色——macOS systemYellow(Finder/Mail 星标惯例),两模式通用
 pub const STAR_YELLOW: u32 = 0xFFCC00;
 
+/// 放大预览工具胶囊的底色。不跟随主题——它永远坐在深遮罩上
+pub const ZOOM_PILL_BG: Hsla = Hsla {
+    h: 60. / 360.,
+    s: 0.035,
+    l: 0.105,
+    a: 0.82,
+};
+
 /// 会话流日期组头的竖条色。比 agent 品牌橙更亮更饱和,避免读成身份标记
 /// ——它标的是时间分组。两模式通用
 pub const DATE_GROUP_ACCENT: u32 = 0xFF8A3D;

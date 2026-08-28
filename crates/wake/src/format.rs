@@ -133,6 +133,19 @@ pub fn expand_tilde(p: &str) -> String {
 /// 或 `AvailableSpace::Definite` 才画省略号(`elements/text.rs:357`),
 /// 虚拟列表行与 flex 子项都拿不到,文字会按 max-content 铺开再被
 /// `overflow_hidden` 硬裁在半个字上。
+/// 字节数 → 人读的体积。只给 KB / MB 两档:放大预览里这是辅助信息,
+/// 精确到字节没有意义,而 GB 级的图不会出现在会话里。
+pub fn human_bytes(n: usize) -> String {
+    const KB: f64 = 1024.;
+    const MB: f64 = KB * 1024.;
+    let n = n as f64;
+    if n >= MB {
+        format!("{:.1} MB", n / MB)
+    } else {
+        format!("{:.0} KB", (n / KB).max(1.))
+    }
+}
+
 pub fn clip_display(s: &str, cells: usize) -> String {
     let width = |c: char| {
         if (c as u32) >= 0x1100 && !c.is_ascii() {

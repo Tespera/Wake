@@ -19,6 +19,9 @@ chrono = { version = "0.4", features = ["serde"] }
 zstd = "0.13"
 # 会话 jsonl 里内联图片的 base64 解码(已由 gpui→usvg 带进 lockfile,此处只是加一条直接依赖边)
 base64 = "0.22"
+# 只用来读图片头拿原始宽高(缩略图按正方形裁切要知道该钉宽还是钉高);
+# gpui 已带同版本,不新增 crate
+image = { version = "0.25", default-features = false }
 semver = "1"
 reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 
