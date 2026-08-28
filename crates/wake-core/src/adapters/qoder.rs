@@ -210,6 +210,7 @@ fn flush_assistant(
         thinking,
         timestamp: p.timestamp,
         model: p.model,
+        images: Vec::new(),
     });
 }
 
@@ -477,6 +478,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                     thinking: None,
                     timestamp: (ts > 0).then_some(ts),
                     model: None,
+                    images: Vec::new(),
                 });
             }
             continue;
@@ -503,7 +505,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                                     parts.push(text.to_string());
                                 }
                             }
-                            Some("image") => parts.push("[image]".to_string()),
+                            Some("image") => parts.push(IMAGE_PLACEHOLDER.to_string()),
                             Some("tool_result") => {
                                 let id = block
                                     .get("tool_use_id")
@@ -563,6 +565,7 @@ fn parse_qoder_jsonl(path: &Path) -> Result<QoderParse> {
                 thinking: None,
                 timestamp: (ts > 0).then_some(ts),
                 model: None,
+                images: Vec::new(),
             });
             continue;
         }

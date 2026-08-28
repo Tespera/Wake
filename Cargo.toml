@@ -17,6 +17,8 @@ walkdir = "2"
 notify = "7"
 chrono = { version = "0.4", features = ["serde"] }
 zstd = "0.13"
+# 会话 jsonl 里内联图片的 base64 解码(已由 gpui→usvg 带进 lockfile,此处只是加一条直接依赖边)
+base64 = "0.22"
 semver = "1"
 reqwest = { package = "zed-reqwest", version = "0.12.15-zed", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
 

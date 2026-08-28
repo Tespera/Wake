@@ -232,6 +232,16 @@ impl Role {
     }
 }
 
+/// 一张内联图片。Claude Code 把用户贴的图以 base64 写进 jsonl,
+/// `bytes` 是解码后的原始编码字节(PNG/JPEG 等),不是像素。
+/// 只在详情解析路径填充,索引路径恒为空——见 `parse_claude_jsonl` 的 `decode_images`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    /// jsonl 里的 `media_type`,如 `image/png`
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
 /// 详情页统一消息模型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptMessage {
@@ -246,6 +256,9 @@ pub struct TranscriptMessage {
     /// epoch ms
     pub timestamp: Option<i64>,
     pub model: Option<String>,
+    /// 随消息内联的图片,按出现顺序
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +425,10 @@ pub const HL_CLOSE: char = '\u{e001}';
 
 /// 单条消息正文入库/传输上限
 pub const MAX_MSG_TEXT: usize = 32 * 1024;
+
+/// 单张内联图片 base64 的长度上限(约 12 MB 原图)。超过就不解码、退回 `[image]`
+/// 占位文字——防一条消息里塞进超大图把详情页拖垮。
+pub const MAX_IMAGE_B64: usize = 16 * 1024 * 1024;
 /// tool 输入/输出、thinking 上限
 pub const MAX_TOOL_IO: usize = 16 * 1024;
 pub const MAX_TITLE: usize = 80;

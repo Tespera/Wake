@@ -562,6 +562,7 @@ impl BlockAcc {
             },
             timestamp: if ts > 0 { Some(ts) } else { None },
             model,
+            images: Vec::new(),
         })
     }
 }

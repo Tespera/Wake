@@ -2,6 +2,8 @@ use super::parse_utils::*;
 use super::{units_from_messages, AgentAdapter};
 use crate::models::*;
 use anyhow::Result;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -91,10 +93,18 @@ fn flush_assistant(
         thinking,
         timestamp: p.timestamp,
         model: p.model,
+        images: Vec::new(),
     });
 }
 
-fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResult> {
+/// `decode_images`:是否把内联图片的 base64 解出来。
+/// **索引路径必须传 false**——`parse_session` 与 `parse_transcript` 共用本函数,
+/// 全量扫描时解码所有图片会白烧内存与时间(图片不进 DB,只在详情页用)。
+fn parse_claude_jsonl(
+    path: &Path,
+    include_sidechain: bool,
+    decode_images: bool,
+) -> Result<ParseResult> {
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
 
@@ -196,6 +206,7 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
                         thinking: None,
                         timestamp: ts_opt(ts),
                         model: None,
+                        images: Vec::new(),
                     });
                 }
             }
@@ -208,6 +219,7 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
             let content = message.get("content");
             let mut parts: Vec<String> = Vec::new();
             let mut had_tool_result = false;
+            let mut images: Vec<ImageAttachment> = Vec::new();
 
             match content {
                 Some(Value::String(s)) => parts.push(s.clone()),
@@ -232,7 +244,14 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
                                     }
                                 }
                             }
-                            Some("image") => parts.push("[image]".to_string()),
+                            Some("image") => {
+                                match decode_image_block(b) {
+                                    Some(img) if decode_images => images.push(img),
+                                    // 关着解码、或解不出来时退回占位文字,
+                                    // 否则纯图消息会因 text 为空被整条丢掉
+                                    _ => parts.push(IMAGE_PLACEHOLDER.to_string()),
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -241,7 +260,7 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
             }
 
             let text = parts.join("\n\n").trim().to_string();
-            if text.is_empty() {
+            if text.is_empty() && images.is_empty() {
                 let _ = had_tool_result;
                 continue;
             }
@@ -269,6 +288,7 @@ fn parse_claude_jsonl(path: &Path, include_sidechain: bool) -> Result<ParseResul
                 thinking: None,
                 timestamp: ts_opt(ts),
                 model: None,
+                images,
             });
             continue;
         }
@@ -392,7 +412,33 @@ fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessa
         thinking: None,
         timestamp: ts_opt(ts),
         model: None,
+        images: Vec::new(),
     }
+}
+
+/// 单张内联图片块 → `ImageAttachment`。
+/// 只认 `source.type == "base64"`;URL 形式的图片本地拿不到,交回调用方走占位文字。
+fn decode_image_block(b: &Value) -> Option<ImageAttachment> {
+    let src = b.get("source")?;
+    if src.get("type").and_then(|v| v.as_str()) != Some("base64") {
+        return None;
+    }
+    let data = src.get("data").and_then(|v| v.as_str())?;
+    if data.len() > MAX_IMAGE_B64 {
+        return None;
+    }
+    let bytes = BASE64.decode(data).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(ImageAttachment {
+        media_type: src
+            .get("media_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("image/png")
+            .to_string(),
+        bytes,
+    })
 }
 
 fn stringify_tool_result(content: Option<&Value>) -> String {
@@ -402,7 +448,7 @@ fn stringify_tool_result(content: Option<&Value>) -> String {
             .iter()
             .filter_map(|c| match c.get("type").and_then(|v| v.as_str()) {
                 Some("text") => c.get("text").and_then(|v| v.as_str()).map(String::from),
-                Some("image") => Some("[image]".to_string()),
+                Some("image") => Some(IMAGE_PLACEHOLDER.to_string()),
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -536,7 +582,7 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_claude_jsonl(Path::new(&r.file_path), false)?;
+        let parsed = parse_claude_jsonl(Path::new(&r.file_path), false, false)?;
         let meta = build_meta(r, &parsed);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -547,7 +593,7 @@ impl AgentAdapter for ClaudeAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_claude_jsonl(Path::new(&r.file_path), false)?;
+        let parsed = parse_claude_jsonl(Path::new(&r.file_path), false, true)?;
         let sidechains = list_sidechains(r);
         let mut mainline = parsed.messages.clone();
         // 把 sidechain 挂到主线对应 Task tool call
@@ -579,7 +625,7 @@ impl AgentAdapter for ClaudeAdapter {
         if !file.is_file() {
             return Ok(Vec::new());
         }
-        let parsed = parse_claude_jsonl(&file, true)?;
+        let parsed = parse_claude_jsonl(&file, true, true)?;
         Ok(parsed.messages)
     }
 

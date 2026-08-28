@@ -1,4 +1,6 @@
 use crate::models::*;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use serde_json::Value;
 
 /// 文件 mtime → epoch ms(各家 adapter 与 watcher 共用)
@@ -48,6 +50,7 @@ pub fn text_msg(role: Role, text: &str, ts: i64) -> TranscriptMessage {
         thinking: None,
         timestamp: if ts > 0 { Some(ts) } else { None },
         model: None,
+        images: Vec::new(),
     }
 }
 
@@ -241,6 +244,97 @@ pub fn to_epoch_ms(v: &Value) -> i64 {
 }
 
 /// 清洗标题候选:剥 slash-command 壳与 system-reminder 等标签,压单行截断。空串=不可用
+/// `data:image/png;base64,....` → `ImageAttachment`。
+/// Codex 走 OpenAI 的形状,把 media_type 与数据编在一条 URI 里,
+/// 不像 Claude 那样分成两个字段。非 base64 的 data URI 与 http(s) 链接
+/// 都返回 None——后者的图不在本地,拿不到。
+pub fn decode_data_uri(uri: &str) -> Option<ImageAttachment> {
+    let rest = uri.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media_type = meta.strip_suffix(";base64")?;
+    if !media_type.starts_with("image/") || data.len() > MAX_IMAGE_B64 {
+        return None;
+    }
+    let bytes = BASE64.decode(data).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(ImageAttachment {
+        media_type: media_type.to_string(),
+        bytes,
+    })
+}
+
+/// 拆开 Codex Desktop 给用户消息套的文件前言。原文形如:
+///
+/// ```text
+/// # Files mentioned by the user:
+///
+/// ## nihaisha.png: /Users/me/Downloads/nihaisha.png
+///
+/// ## My request for Codex:
+/// 参考这张图片,再次修正人物面部。
+/// ```
+///
+/// **不能整条当注入内容丢掉**——前言里裹着用户真正的提问。本机 18 条这类
+/// 消息里 15 条带着实质问题,整条过滤等于把它们从正文和检索里一起删掉。
+/// 文件清单本身不必进正文:它对应的图已由 `input_image` 块渲染出来。
+///
+/// 返回 `Some` 表示这确实是一层包装(空串 = 只有文件清单、没有提问,
+/// 调用方按空消息处理);`None` 表示不是包装,原样使用。
+///
+/// 拆包必须发生在 `is_injected_user_content` 判定**之前**,否则前缀一命中
+/// 整条就被判成 Meta 了。
+pub fn unwrap_file_preamble(text: &str) -> Option<String> {
+    const HEADS: &[&str] = &[
+        "# Files mentioned by the user",
+        "# Files pasted by the user",
+    ];
+    const MARK: &str = "## My request for Codex:";
+    let t = text.trim_start();
+    if !HEADS.iter().any(|h| t.starts_with(h)) {
+        return None;
+    }
+    Some(match t.find(MARK) {
+        Some(i) => t[i + MARK.len()..].trim().to_string(),
+        None => String::new(),
+    })
+}
+
+/// 剥掉 Codex Desktop 写进正文的 `<image name=... path=...>` 标签。
+///
+/// 它指向 `/var/folders/**/T/` 下的剪贴板临时文件,而那个目录会被系统清理
+/// ——本机实测引用的文件已全部不存在,标签只剩一长串不可读的路径压在正文里。
+/// 真正的图另有 `input_image` 块承载,不会因为剥掉标签而丢失。
+pub fn strip_image_tags(text: &str) -> String {
+    if !text.contains("<image ") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<image ") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        // 两种收尾:自闭合的 `>` 与带闭合标签的 `</image>`
+        let end = match after.find("</image>") {
+            Some(e) if after[..e].find('>').is_some_and(|g| g < e) => e + "</image>".len(),
+            _ => match after.find('>') {
+                Some(g) => g + 1,
+                None => {
+                    out.push_str(after);
+                    return out;
+                }
+            },
+        };
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// 非文本内容块在正文里的占位文字。图片走它,标题提取要跳过它
+pub const IMAGE_PLACEHOLDER: &str = "[image]";
+
 pub fn clean_title_candidate(raw: &str) -> String {
     let mut s = strip_tag_block(raw, "system-reminder");
     s = strip_tag_block(&s, "local-command-caveat");
@@ -281,7 +375,16 @@ pub fn clean_title_candidate(raw: &str) -> String {
             out.push(c);
         }
     }
-    let compact = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut compact = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    // 占位符不是用户说的话,不该出现在标题里。位置不固定——Claude 的图块在
+    // 文字前(占位在开头),Codex 的在文字后(占位在末尾),所以整串都清掉
+    if compact.contains(IMAGE_PLACEHOLDER) {
+        compact = compact
+            .replace(IMAGE_PLACEHOLDER, " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
     if compact.is_empty() {
         return String::new();
     }

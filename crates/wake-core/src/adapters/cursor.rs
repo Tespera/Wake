@@ -115,6 +115,7 @@ fn flush_assistant(pending: &mut Option<PendingAssistant>, messages: &mut Vec<Tr
         thinking: None,
         timestamp: p.timestamp,
         model: None,
+        images: Vec::new(),
     });
 }
 

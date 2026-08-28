@@ -152,7 +152,9 @@ fn friendly_source(originator: &str) -> Option<String> {
     })
 }
 
-fn parse_rollout(path: &Path) -> Result<CodexParse> {
+/// `decode_images`:是否把内联图片的 data URI 解出来。
+/// **索引路径必须传 false**——与 claude.rs 同理,两条路径共用本函数。
+fn parse_rollout(path: &Path, decode_images: bool) -> Result<CodexParse> {
     let file = fs::File::open(path)?;
     let reader = BufReader::with_capacity(1 << 20, file);
 
@@ -236,35 +238,48 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
                     "message" => {
                         let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                         let mut parts: Vec<String> = Vec::new();
+                        let mut images: Vec<ImageAttachment> = Vec::new();
                         match payload.get("content") {
                             Some(Value::Array(blocks)) => {
                                 for b in blocks {
-                                    if matches!(
-                                        b.get("type").and_then(|v| v.as_str()),
-                                        Some("input_text") | Some("output_text") | Some("text")
-                                    ) {
-                                        if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
-                                            parts.push(t.to_string());
+                                    match b.get("type").and_then(|v| v.as_str()) {
+                                        Some("input_text") | Some("output_text") | Some("text") => {
+                                            if let Some(t) = b.get("text").and_then(|v| v.as_str())
+                                            {
+                                                parts.push(clean_user_text(t));
+                                            }
                                         }
+                                        // Codex 走 OpenAI 的形状:图在 `image_url` 里,
+                                        // 是一整条 data URI,不像 Claude 那样 media_type
+                                        // 与 data 分开
+                                        Some("input_image") => {
+                                            match b
+                                                .get("image_url")
+                                                .and_then(|v| v.as_str())
+                                                .and_then(decode_data_uri)
+                                            {
+                                                Some(img) if decode_images => images.push(img),
+                                                _ => parts.push(IMAGE_PLACEHOLDER.to_string()),
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
-                            Some(Value::String(s)) => parts.push(s.clone()),
+                            Some(Value::String(s)) => parts.push(clean_user_text(s)),
                             _ => {}
                         }
                         let text = parts.join("\n\n").trim().to_string();
-                        if text.is_empty() {
+                        if text.is_empty() && images.is_empty() {
                             continue;
                         }
-                        match role {
-                            "user" => {
-                                messages.push(mk_msg(Role::User, user_kind(&text), &text, ts))
-                            }
-                            "assistant" => {
-                                messages.push(mk_msg(Role::Assistant, MessageKind::Text, &text, ts))
-                            }
-                            _ => messages.push(mk_msg(Role::System, MessageKind::Meta, &text, ts)),
-                        }
+                        let mut msg = match role {
+                            "user" => mk_msg(Role::User, user_kind(&text), &text, ts),
+                            "assistant" => mk_msg(Role::Assistant, MessageKind::Text, &text, ts),
+                            _ => mk_msg(Role::System, MessageKind::Meta, &text, ts),
+                        };
+                        msg.images = images;
+                        messages.push(msg);
                     }
                     "reasoning" => {
                         // encrypted_content 丢弃,只取明文 summary
@@ -444,6 +459,16 @@ fn parse_rollout(path: &Path) -> Result<CodexParse> {
     })
 }
 
+/// Codex Desktop 往用户消息里塞的两样东西:文件前言(裹着真正的提问)与
+/// `<image ...>` 标签(指向已被清理的临时文件)。两者都在这里摘掉。
+///
+/// **必须在 `user_kind()` 之前跑**——拆包后的文本不再以注入前缀开头,
+/// 否则整条会被判成 Meta,用户的提问随之消失。
+fn clean_user_text(t: &str) -> String {
+    let unwrapped = unwrap_file_preamble(t);
+    strip_image_tags(unwrapped.as_deref().unwrap_or(t))
+}
+
 fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessage {
     let (clipped, truncated) = clip(text, MAX_MSG_TEXT);
     TranscriptMessage {
@@ -456,6 +481,7 @@ fn mk_msg(role: Role, kind: MessageKind, text: &str, ts: i64) -> TranscriptMessa
         thinking: None,
         timestamp: if ts > 0 { Some(ts) } else { None },
         model: None,
+        images: Vec::new(),
     }
 }
 
@@ -617,7 +643,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_session(&self, r: &SessionFileRef) -> Result<ParsedSession> {
-        let parsed = parse_rollout(Path::new(&r.file_path))?;
+        let parsed = parse_rollout(Path::new(&r.file_path), false)?;
         let meta = build_meta(r, &parsed, &self.archived_dir);
         let units = units_from_messages(&parsed.messages);
         Ok(ParsedSession {
@@ -628,7 +654,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn parse_transcript(&self, r: &SessionFileRef) -> Result<ParsedTranscript> {
-        let parsed = parse_rollout(Path::new(&r.file_path))?;
+        let parsed = parse_rollout(Path::new(&r.file_path), true)?;
         Ok(ParsedTranscript {
             meta: build_meta(r, &parsed, &self.archived_dir),
             mainline: parsed.messages,

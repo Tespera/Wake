@@ -351,6 +351,20 @@ fn claude_ref() -> SessionFileRef {
         "11111111-aaaa-bbbb-cccc-000000000001",
     )
 }
+fn claude_images_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::ClaudeCode,
+        &fixture("claude/projects/-Users-tester-Github-wakefx/44444444-aaaa-bbbb-cccc-000000000004.jsonl"),
+        "44444444-aaaa-bbbb-cccc-000000000004",
+    )
+}
+fn codex_images_ref() -> SessionFileRef {
+    fs_ref(
+        AgentId::Codex,
+        &fixture("codex/sessions/2026/08/08/rollout-2026-08-08T09-00-00-55555555-aaaa-bbbb-cccc-000000000005.jsonl"),
+        "55555555-aaaa-bbbb-cccc-000000000005",
+    )
+}
 fn codex_ref() -> SessionFileRef {
     fs_ref(
         AgentId::Codex,
@@ -1959,4 +1973,135 @@ fn adapter_ix_for_routes_to_owning_instance() {
         Some(1),
         "无根命中回退该 agent 首个实例"
     );
+}
+
+/// 内联图片:详情路径解出字节,索引路径一个都不解。
+///
+/// 后者是硬约束——两条路径共用同一个 parser,索引要全量扫描所有会话文件,
+/// 在那里解码等于把每张图白解一遍。
+#[test]
+fn claude_inline_images_only_decode_on_transcript_path() {
+    let a = ClaudeAdapter::new();
+    let r = claude_images_ref();
+
+    let t = a.parse_transcript(&r).expect("transcript");
+    let users: Vec<&TranscriptMessage> =
+        t.mainline.iter().filter(|m| m.role == Role::User).collect();
+    assert_eq!(users.len(), 4, "四条 user 消息都要在");
+
+    // 1) 图 + 文字:图解出来,文字不受影响
+    assert_eq!(users[0].images.len(), 1);
+    assert_eq!(users[0].images[0].media_type, "image/png");
+    assert!(
+        users[0].images[0].bytes.starts_with(b"\x89PNG"),
+        "解出来的应当是 PNG 原始字节"
+    );
+    assert_eq!(users[0].text, "这个按钮的颜色对不上");
+
+    // 2) 纯图消息:text 为空也不能被丢掉,否则整条消息消失
+    assert_eq!(users[1].images.len(), 1);
+    assert!(users[1].text.is_empty());
+
+    // 3) gpui 渲染不了的格式仍然解字节,由 UI 层决定怎么展示
+    assert_eq!(users[2].images.len(), 1);
+    assert_eq!(users[2].images[0].media_type, "image/heic");
+
+    // 4) URL 形式本地拿不到,退回占位文字,不能让消息变空
+    assert!(users[3].images.is_empty());
+    assert_eq!(users[3].text, "[image]");
+
+    // 标题不能被占位符占掉:首条消息是"两张图 + 一句话"时,标题要是那句话
+    assert_eq!(
+        t.meta.title, "这个按钮的颜色对不上",
+        "标题应跳过 [image] 占位,取真正的用户输入"
+    );
+
+    // 索引路径:一个字节都不解,且纯图消息仍以 [image] 进检索单元
+    let s = a.parse_session(&r).expect("session");
+    assert!(
+        s.units.iter().all(|u| !u.text.is_empty()),
+        "索引单元不应出现空文本"
+    );
+    let user_units: Vec<&str> = s
+        .units
+        .iter()
+        .filter(|u| u.role == Role::User)
+        .map(|u| u.text.as_str())
+        .collect();
+    assert_eq!(
+        user_units,
+        vec![
+            "[image]\n\n这个按钮的颜色对不上",
+            "[image]",
+            "[image]",
+            "[image]"
+        ],
+        "索引路径的文本必须与加图片支持之前逐字一致——检索结果不能因此漂移"
+    );
+}
+
+/// Codex 的图走 OpenAI 形状(`input_image` + data URI),与 Claude 的
+/// `source.data` 不同;正文里另有 Codex Desktop 写的 `<image ...>` 标签,
+/// 指向已被系统清理的临时文件,要剥掉。
+#[test]
+fn codex_inline_images_decode_and_strip_desktop_tags() {
+    let a = CodexAdapter::new();
+    let r = codex_images_ref();
+
+    let t = a.parse_transcript(&r).expect("transcript");
+    let users: Vec<&TranscriptMessage> =
+        t.mainline.iter().filter(|m| m.role == Role::User).collect();
+    assert_eq!(users.len(), 5);
+
+    // 1) 图 + 文字:图解出来,`<image ...>` 标签从正文剥掉
+    assert_eq!(users[0].images.len(), 1);
+    assert_eq!(users[0].images[0].media_type, "image/png");
+    assert!(users[0].images[0].bytes.starts_with(b"\x89PNG"));
+    assert_eq!(
+        users[0].text, "这个按钮颜色不对",
+        "Codex Desktop 的 <image ...> 标签必须剥掉——它指向已被清理的临时文件"
+    );
+
+    // 2) 纯图消息:没有文字也不能被丢掉
+    assert_eq!(users[1].images.len(), 1);
+    assert!(users[1].text.is_empty());
+
+    // 3) 远端图本地拿不到,退回占位,消息不变空
+    assert!(users[2].images.is_empty());
+    assert_eq!(users[2].text, "[image]");
+
+    // 4) Codex Desktop 的文件前言裹着用户真正的提问:拆包保留提问、丢掉
+    //    文件清单。**整条判成 Meta 会把用户的话一起删掉**
+    assert_eq!(users[3].images.len(), 1);
+    assert_eq!(users[3].text, "参考这张图，人物面部不要有任何变化");
+    assert_eq!(
+        users[3].kind,
+        MessageKind::Text,
+        "拆包必须在注入判定之前,否则前缀一命中整条就成 Meta 了"
+    );
+
+    // 5) 只有文件清单、没有提问:文本清空,消息靠图片留下来
+    assert!(users[4].text.is_empty());
+    assert_eq!(users[4].images.len(), 1);
+
+    // 索引路径:一个字节都不解,标签与前言同样已被摘掉
+    let s = a.parse_session(&r).expect("session");
+    let user_units: Vec<&str> = s
+        .units
+        .iter()
+        .filter(|u| u.role == Role::User)
+        .map(|u| u.text.as_str())
+        .collect();
+    assert_eq!(
+        user_units,
+        vec![
+            "这个按钮颜色不对\n\n[image]",
+            "[image]",
+            "[image]",
+            "参考这张图，人物面部不要有任何变化\n\n[image]",
+            "[image]"
+        ],
+        "用户的提问必须进检索;文件清单与临时路径不进"
+    );
+    assert_eq!(s.meta.title, "这个按钮颜色不对");
 }
