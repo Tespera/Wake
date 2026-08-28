@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Update: the transcript now reads like a document — assistant replies at 14.5px with 1.92 line height in a 612px column (about 42 CJK characters per line), roomier spacing between blocks, clearer heading levels, and code blocks with a language label and a copy button
+- Update: your own messages keep their bubble; role is conveyed by shape rather than a label
+- Update: thinking can be expanded instead of being cut to a single line forever
+- Update: tool calls are collapsible cards that show the arguments while collapsed, and expand to both the input and the output — successful calls included, not just failures
+- Update: session detail header is two lines instead of six; the project path, exact timestamps and the session file path move into tooltips and the overflow menu
+- Update: the session list groups by Today / Yesterday / Earlier, shows a total count, and puts the message count on every row
+- Fix: long session titles are truncated with an ellipsis instead of being cut mid-character
+- Fix: while the first scan is running the list says it is indexing, instead of claiming there are no matching sessions
+- Fix: when the list is capped, it says how many of the total are shown instead of silently truncating
+- Fix: a session that fails to parse shows why, with a button to reveal the file, instead of an empty reading pane
+- Fix: `HEAD` is no longer shown as a git branch name
+- Fix: code blocks now switch colours together with the appearance — they used to keep the previous theme's palette, and even then only caught up after a delay
+- Update: the default window is sized from your screen (78% × 82%, capped at 1400 × 900) instead of a fixed 1180 × 760
+
 ## [0.3.0] — 2026-08-27
 
 - New: Insights page — a new sidebar entry showing your coding agent activity at a glance: sessions, tokens, prompts, agents, projects, and active days

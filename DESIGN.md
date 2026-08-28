@@ -35,7 +35,7 @@ Wake 的目标不是展示技术感，而是让用户在几秒内重新找到并
 
 | 项目 | 规格 |
 |---|---|
-| 默认窗口 | 1180 × 760，居中(14" 屏约占 78% × 77%) |
+| 默认窗口 | 按屏幕取 78% × 82%,钳进 [940×620, 1400×900] 后居中。上限是因为正文列宽固定 612,窗口再宽多出来的全是空白 |
 | 最小窗口 | 940 × 620 |
 | 窗口顶部 | macOS 主窗口使用 44px 透明标题栏，交通灯与拖拽区收在侧栏顶部；Windows 用原生标题栏，Linux 视 compositor 装饰协商而定 |
 | 资料库侧栏 | 224px 固定宽度 |
@@ -46,7 +46,7 @@ Wake 的目标不是展示技术感，而是让用户在几秒内重新找到并
 
 ## 颜色
 
-所有颜色必须来自 `theme.rs` 的语义 token(含 MODEL_BADGE_BG/STAR_YELLOW 两个专用常量);其他 UI 文件禁止颜色字面量。Agent 品牌资产只能来自 `AgentId::brand_icon(dark)`(内嵌 PNG 路径,定义在 `wake-core/src/models.rs`),加新 agent 时一处改完。
+所有颜色必须来自 `theme.rs` 的语义 token(含 STAR_YELLOW 常量,以及对话区专用的 `bubble_bg` / `panel_bg` / `panel_border` / `inline_code_bg` 四个随模式取值的函数);其他 UI 文件禁止颜色字面量。Agent 品牌资产只能来自 `AgentId::brand_icon(dark)`(内嵌 PNG 路径,定义在 `wake-core/src/models.rs`),加新 agent 时一处改完。
 
 ### 主要材质
 
@@ -85,9 +85,10 @@ Wake 的目标不是展示技术感，而是让用户在几秒内重新找到并
 |---|---|---|---|---|
 | Title | `FONT_TITLE` | 22px | Semibold | 中栏上下文大标题 |
 | Heading | `FONT_HEADING` | 16px | Semibold | 详情页会话标题、空态主标题 |
-| Msg user | `FONT_MSG_USER` | 13.5px | Regular | 对话区用户气泡正文 |
-| Msg body | `FONT_MSG_BODY` | 13px | Regular | 对话区助手正文 |
-| Msg thinking | `FONT_MSG_THINKING` | 11.5px | Italic | 对话区 thinking 摘要 |
+| Msg user | `FONT_MSG_USER` | 14px | Regular | 对话区用户气泡正文 |
+| Msg body | `FONT_MSG_BODY` | 14.5px | Regular | 对话区助手正文 |
+| Msg thinking | `FONT_MSG_THINKING` | 12.5px | Regular | thinking / 工具卡头行与折叠内容 |
+| Msg mono | `FONT_MSG_MONO` | 11.75px | Mono | 工具卡的参数与输入输出 |
 | Body | `FONT_BODY` | 14px | Regular(列表/搜索结果标题 Medium) | 导航行、**侧栏组头**、列表标题、按钮、输入、对话框正文 |
 | Caption | `FONT_CAPTION` | 12px | Regular | 列表副行、元信息、占位、空态提示、路径 chip、侧栏子级行 |
 | Label | `FONT_LABEL` | 11px | Regular | 计数、快捷键徽标、状态栏、会话行与详情头元信息 |
@@ -141,45 +142,74 @@ macOS 不设置横跨三栏的自定义 header。主窗口透明标题栏高 44p
 
 ### 会话流
 
-- 顶部由 22px 上下文标题、会话总数角标和 icon-only 排序按钮组成；整个标题区固定为 88px，与左栏顶部身份区等高。标题和会话总数保持 2px 紧凑间距，并作为一个信息组在 88px 内整体垂直居中，禁止拆成两条 44px 行。排序按钮与信息组顶部对齐，沿用 16px 图标、透明 ghost 常态和 6px 圆角；当前排序字段和方向放在 tooltip 与菜单选中态中。
-- 会话流固定 336px；顶部使用 22px 上下文标题、Label 11 会话数量和 icon-only 排序按钮。
-- 会话行使用 Body 14 标题与 Label 11 元信息，共两行；行内 `SPACE_SM` 上下内边距 + `SPACE_XS` 两行间距。
-- 第二行固定为品牌图标 15px、项目名 badge、弹性空隙和右对齐的智能时间；一分钟内显示 Just now，一小时内显示分钟数，当天显示时间，昨天显示 Yesterday，本年显示月日，更早补年份。Hover 统一显示精确到秒的本地时间。
-- 分支、token 和归档状态不在列表重复展示，移入详情元信息。
-- 收藏和置顶允许以 11px 系统蓝图标出现在标题尾部。
+- 顶部由 22px 上下文标题与会话总数角标组成,右侧是 icon-only 排序按钮(当前排序方式由 tooltip 给出)。总数取全库计数,与侧栏 All Sessions 同源。
+- **按时间分组**:Today / Yesterday / Earlier this week / 月份,组头 Label 11 semibold muted。仅在按更新/创建时间**倒序**时分组——按消息数排序时时间不单调,分组会碎成一堆单元素组;正序时组头顺序会反着读。
+- 会话行两行:第一行只有标题(Body 14 medium),第二行是元信息。**标题必须是行容器的直接子级**,理由见下方「文字截断」。
+- 第二行固定为:品牌图标 14px → 项目名 badge → ` · ` → 消息数 → 弹性空隙 → 收藏/置顶 → 相对时间。
+- **agent 品牌图标固定保留**,它是每行的身份锚点,不做"当前范围内 agent 唯一就省略"的优化。
+- model 不进列表:336px 的列放不下"项目 + 消息数 + model + 时间",硬塞会把项目名挤成两三个字。model 在详情页元信息带里。
+- 列表被 limit 截断时,底部用一条 hairline + Label 档说明"Showing the N most recent of M",不静默截断。
+- 空态按状态分四种:扫描中(索引进度)、扫描失败(错误)、有筛选无结果、全库为空。**扫描期间不得报"没有匹配项"**——那时既没有筛选也没有查询。
 - 当前行使用低饱和蓝材质，不额外描边。
 - 会话流不重复提供全文搜索入口；列表内输入只筛选当前范围。
 
 ### 详情头部
 
-层级从上到下为：
+**只有两层**(2026-08-26 改版,原为六层):
 
-1. Agent、项目、分支等来源上下文与右侧操作工具条，共享一个 44px 高的 Flex 行；28px 操作条上下各保留 8px，不使用绝对定位。
-2. 会话标题独占第二个 44px 行，与第一行合计 88px；标题行下沿与左栏身份区和会话列表标题区对齐。标题保持 22px，过长时单行截断。
-3. 模型、来源（Via）badge 与消息数/token 共处标题下方第一行；统计文本弹性占据剩余宽度，窄窗口下单行截断。
-4. 项目路径独占第二行。
-5. 第三行以 12px 日期图标开头，创建与更新信息复用会话列表的智能时间，两者以留白和低对比度中点明确分组；Hover 对应时间时统一展示精确到秒的完整本地时间。
-
-五层信息一项不减；标题下方的三行信息不压进 88px 标题区域。元信息区与标题、底部分隔线均保留 8px，层间保持 8px，让来源、标题、运行统计、位置和时间上下文能被分别扫读。
+1. 22px 会话标题(**单行**,按可用宽度自截断 + 全文 tooltip)与操作区。
+2. 单条元信息带:品牌图标 13px · Agent 名 · 项目名 · git 分支 · model · source 徽标 · 消息数 · token · 相对时间,全部 Label 档 muted,用 ` · ` 串起。
 
 “在终端继续”是唯一主按钮。收藏、置顶保留为独立图标按钮；导出、Finder 和删除进入“更多”菜单。按钮圆角固定 6px，危险操作在菜单中用分组隔开并继续走确认框。
 
-详情正文使用 `popover` 阅读底色，与 `background` 详情头形成明确分区；阅读面横向铺满且不套大号圆角卡。内容限制在 720px 阅读宽度并居中。助手正文保持平铺，不在每条回复前重复 Agent 署名。只有 thinking、没有回复正文或工具调用的中间事件不进入阅读视图；带正文的 thinking 摘要保留，工具调用继续默认折叠。
+三处信息**收进 tooltip 或菜单,不再占位**:
+
+- 项目完整路径 → 项目名的 tooltip(点击仍然 Reveal)。
+- 精确到秒的 Created / Updated → 相对时间的 tooltip。
+- 会话 JSONL 文件路径 → 整行删除。中段是 UUID,对人零价值;Reveal 入口在 `…` 菜单里已经有了。
+
+两条隐藏规则:git 分支为 `HEAD` / `detached` / 空时整块不渲染(detached HEAD 下透传的 "HEAD" 零信息量);model 用同级 muted 文字而**不是** badge——原先那个 outline badge 用的是 Claude 橙,却被套在所有 agent 上,与"品牌色只表达 agent 身份"自相矛盾。
 
 对话框标题一律 Heading 16 semibold:组件内建 `.title()` 不设字号(实渲窗口默认 14px),必须显式补 `text_size(FONT_HEADING)`。破坏性确认的主按钮点名动作并用 danger 形态("Move to Trash",Windows 上经 trash_copy! 平台文案为 "Move to Recycle Bin",不留裸 "OK");表单弹窗内控件同档取齐(输入框与下拉/浏览钮同高,次级动作行才允许 small)。
 
 ### 对话阅读面
 
-正文横向铺在 `popover` 材质阅读面中，与 `background` 详情头用 hairline 分开，不再套圆角大卡。助手正文 13px、用户正文 13.5px，可选择、可滚动，代码继续使用 tree-sitter 高亮。
+正文位于 `popover` 材质的 12px 圆角阅读卡中，外层使用 `background`。渲染形制对标 Claude Desktop(2026-08-26 用户定)。
 
-对话角色不使用常驻标题或 emoji：
+**角色由形态区分,不用文字标签**:
 
-- 用户使用靠右的低饱和引用块。
-- 助手正文平铺，不在每条回复前重复 Agent 名称。
-- 仅有 thinking、没有正文或工具的中间事件不进入阅读视图；带正式回复的思考摘要显示 `Thinking · …`。
-- 工具调用合并为折叠簇，失败项才内联输出。
+- 用户消息 = 右对齐气泡,`RADIUS_BUBBLE` 18px 圆角、`bubble_bg` 暖灰底、最大宽 `BUBBLE_MAX_W`、内边距 17×11。
+- 助手消息 = 全宽平铺,无气泡无标签。
+- `Context compacted` 与 System 消息 = 居中胶囊。
 
-emoji 不再承担界面或正文结构图标职责。
+**三个数是一组,必须一起改**:正文 `FONT_MSG_BODY` 14.5px、行高 `LINE_HEIGHT_PROSE` 1.92、列宽 `PROSE_MAX_W` 612px ≈ 42 个中文字/行。只提字号会让每行字数更少,只放宽容器会让行更长,单调任何一个都比原状更糟。气泡收半档(14px / 1.8),因为它有底色,同字号会显得更重。
+
+行高取 1.92 而不是西文常用的 1.5–1.6:汉字没有 x-height 起伏,字面率高,靠行距拉开视觉通道。段间距 `PROSE_PARAGRAPH_GAP` 1.05rem(=14.7px)比行距再大半档,段落边界才读得出来。
+
+**字间距调不了**:gpui 0.2.2 的 `Styled` 没有 `letter_spacing`,中西文混排的补偿只能靠行距和行宽间接缓解。
+
+**markdown 层级走组件内置能力**(`TextView` 已支持 table / blockquote / divider / 标题分级 / tree-sitter 高亮),UI 层只做样式覆写,不自己解析:
+
+- 标题分级经 `heading_font_size`:h1 ×1.45 / h2 ×1.28 / h3 ×1.14 / h4 ×1.05,再往下与正文同号靠字重区分。对话里的标题不该有网页 h1 的体量(组件默认是近两倍),但也不能差得太小,否则标题会混进正文。
+- **标题从 markdown 里切出来单独渲染**(`workbench::markdown_message` + `split_markdown_blocks`),上间距由 `heading_top_gap(level)` 按层级给:h1 30 / h2 25 / h3 20 / h4+ 16px。
+
+  为什么必须切:组件的标题渲染只有 `pb(rems(0.3))`、**没有 `pt`**(`node.rs` 的 `Node::Heading` 分支),标题上方的间距完全来自前一个块的 `paragraph_gap`——和两个普通段落之间一模一样,所以标题读不出层级。调大 `paragraph_gap` **不解决问题**:它把段间距和标题上间距一起放大,相对关系不变。`TextViewStyle` 也没有对应钩子。
+
+  代价:一条消息会拆成多个 `TextView` 实例,**跨块的文字选择会断在块边界**。切块只按 ATX 标题(`# ` ~ `###### `),并跟踪围栏代码块状态,代码里的 `# ` 注释不会被误判。
+- 块间距 `PROSE_PARAGRAPH_GAP` 1.05rem(14.7px),只管段落 / 列表 / 代码块 / 表格之间。
+- 代码块经 `TextViewStyle::code_block` 套 `panel_bg` + `panel_border` + `RADIUS_PANEL`;右上角经 `code_block_actions` 挂"语言名 + 复制"。组件把 actions 绝对定位在块内右上,做不了横跨顶部的工具栏,所以两者合成一个胶囊。
+- **代码块跟随深浅切换有两个坑,两处都必须做**:
+  1. `TextViewStyle.highlight_theme` 要显式按模式给 `default_dark()` / `default_light()`。默认值恒为 light;而且 `TextViewStyle` 的 `PartialEq` **只**比较 `paragraph_gap` / `heading_base_font_size` / `highlight_theme`——`is_dark` 与 `code_block` 都不参与,不换 highlight_theme 的话新旧 style 会被判定相等,组件根本不重建。
+  2. `TextView` 的 **id 要带上深浅模式**。它只在首次 `request_layout` 时同步解析,之后 style 变化走异步更新通道,带 200ms debounce + 后台线程重新解析(`UpdateFuture::new(.., Duration::from_millis(200), ..)`);而语法高亮的颜色是在**解析阶段**固化进 `CodeBlock.styles` 的,于是切换主题后代码块要慢一拍才变色。id 带上模式后,主题一换就被当作新元素,走首次的同步解析路径。
+
+**thinking 与工具调用都是可折叠面板**(`RADIUS_PANEL` 圆角 + `panel_bg` + `panel_border`),视觉上比正文退后一档:
+
+- thinking 收起时头行给一句摘要,展开是完整原文。不得再做成"永久截断的一行"。
+- 工具卡头行 = chevron + 名称 + **参数摘要** + 结果徽标。收起时就要看得出操作对象,只给工具名等于没有信息。
+- 展开后逐条给 Input 与 Output。**成功调用的输出同样要显示**——只留失败项等于把绝大多数工具结果丢掉,而这是个"回看历史"的工具。
+- 单条调用时头行已给出参数,展开体不再重复名称;多条时头行给数量与名字序列。
+
+emoji 不承担界面或正文结构图标职责。
 
 ### 空态
 
@@ -195,6 +225,31 @@ emoji 不再承担界面或正文结构图标职责。
 - 结果行使用品牌图标、标题、项目与时间、单行片段。
 - 搜索始终覆盖全部会话；页脚左侧显示“搜索范围：全部会话”，右侧显示 `↑↓`、`↩`、`esc` 键盘路径。
 - 指针回调中不得同步派发新的键盘事件。需要关闭旧浮层或转移输入焦点时，应通过对应组件 API 或延迟到下一事件周期处理，避免在 AppKit `mouseUp` 路径里重入 GPUI 事件分发；打开搜索面板前必须让 Root 先保存原焦点，关闭后 `⌘K` 才能继续生效。
+
+## 文字截断(gpui 0.2.2 限制)
+
+**`.truncate()` / `.text_ellipsis()` 在会话流与阅读区都不画省略号。**
+
+gpui 在 `elements/text.rs:357` 只有拿到 `known_dimensions.width` 或 `AvailableSpace::Definite` 时才截断加 `…`;虚拟列表(`v_virtual_list`)行内与 flex 子项拿不到确定宽度,文字于是按 max-content 铺开,再被外层 `overflow_hidden` 硬裁——中文正好切在半个字上。
+
+排查时试过四种结构,**都不出省略号**:标题带 `flex_1()`、去掉 `flex_1` 配弹性占位、把标题提成行容器的直接子级、去掉 `ListItem` 的 `mx`。
+
+给文字元素显式 `.w()` **也不管用**——省略号照样不画。所以定宽区域的文字一律走 `format::clip_display(s, cells)` 按**显示宽度**自截断(CJK / 全角记 2 格,其余记 1 格),并配 `overflow_hidden() + whitespace_nowrap()` 兜底:
+
+| 位置 | 格数来源 | 依据 |
+|---|---|---|
+| 会话行标题 | `TITLE_CELLS` = 42(常量) | 会话流列宽写死 336px,阈值稳定 |
+| 会话行项目名 | `PROJECT_CELLS` = 14(常量) | 与消息数、时间共享第二行 |
+| 详情页标题 | `cells_for(title_w, CELL_PX_TITLE)` | 窗口宽 − 侧栏 − 会话流 − 内边距 − 操作区 |
+| 工具卡参数 | `cells_for(prose_w − 151, CELL_PX_MONO)` | 正文实际列宽(窄窗口下小于 `PROSE_MAX_W`) |
+
+三条硬约束:
+
+1. **宽度会变的地方,格数必须从当前像素宽反算,不能写死。** 阅读区宽度随窗口拖拽变化,写死格数会让"窗口拉宽后截断长度不补齐"——这是实打实的 bug,不是取舍。`cells_for()` 每帧从 `window.viewport_size()` 重算。
+2. **省略号自己占两格。** `…` 是全角,`clip_display` 里给它留 2 格而不是 1 格;只留 1 格时截出来的串会超出容器,`…` 正好落在边界外被裁,看起来就是"截断了但没有省略号"。有单测钉住这条。
+3. **列表行绝不允许换行。** `List` 只测量一行的高度然后套给所有行(`list.rs:406`),一行变两行会把后面每一行都挤错位。格数是估算值,所以 `whitespace_nowrap()` 必须留着。
+
+上游哪天修好 `text_overflow`,连同 `clip_display` 的调用点一起删掉即可。
 
 ### Insights
 
