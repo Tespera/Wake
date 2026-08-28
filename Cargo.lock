@@ -6812,6 +6812,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui-component",
+ "objc",
  "semver",
  "serde",
  "serde_json",

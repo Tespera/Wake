@@ -8,6 +8,7 @@
 
 mod assets;
 mod format;
+mod macos;
 mod settings;
 mod theme;
 mod ui;
@@ -72,7 +73,23 @@ fn main() {
             },
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1180.), px(760.)), cx);
+        // 按屏幕比例取,再钳进 [最小, 理想]。给上限是因为正文列宽固定 612,
+        // 窗口再宽多出来的只是空白
+        const IDEAL: Size<Pixels> = Size {
+            width: px(1400.),
+            height: px(900.),
+        };
+        let win_size = cx
+            .primary_display()
+            .map(|display| {
+                let screen = display.bounds().size;
+                size(
+                    (screen.width * 0.78).clamp(px(940.), IDEAL.width),
+                    (screen.height * 0.82).clamp(px(620.), IDEAL.height),
+                )
+            })
+            .unwrap_or(IDEAL);
+        let bounds = Bounds::centered(None, win_size, cx);
         // macOS:隐藏系统标题栏、内容顶到窗顶,traffic light 悬浮在侧栏上;
         // Linux/Windows:标准系统标题栏(appears_transparent=false)。Windows
         // 后端按此保留原生 caption(min/max/close、snap layouts、深色模式随
@@ -135,6 +152,7 @@ fn main() {
             ));
             std::process::exit(1);
         }
+        macos::suppress_titlebar_separator();
         cx.activate(true);
     });
 }

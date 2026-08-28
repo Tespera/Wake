@@ -26,5 +26,17 @@ reqwest.workspace = true
 # 不做 target 门控:build-dependencies 的 [target.*] 匹配语义在 host/target
 # 之间有历史歧义,门控错方向 build.rs 直接解析失败;它是纯 Rust 小依赖,
 # 三平台无条件编译换四种 host×target 组合全对
+# NSWindow.titlebarSeparatorStyle:gpui 只设了 titlebarAppearsTransparent,
+# 没关掉系统的标题栏分隔线,深色下窗口顶边会留一条亮线。见 src/macos.rs。
+# objc 已经在 gpui 的依赖树里,这里只是直接引用,不新增编译单元
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "0.2"
+
+# objc 0.2 的 msg_send! 宏展开里带着老式的 cfg(feature = "cargo-clippy"),
+# 警告落在调用点而不是宏自己身上,函数级/模块级 allow 都压不住。
+# 这里只把这一个值声明为已知,其余 unexpected_cfg 照常报
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [build-dependencies]
 winresource = "0.1"
