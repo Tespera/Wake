@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed: agent CLI detection now ignores login-shell rc output, including unterminated ANSI title escapes, by parsing only newline-framed Wake probe records
+
 ## [0.3.0] — 2026-08-27
 
 - New: Insights page — a new sidebar entry showing your coding agent activity at a glance: sessions, tokens, prompts, agents, projects, and active days
