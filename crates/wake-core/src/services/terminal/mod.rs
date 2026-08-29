@@ -112,6 +112,16 @@ fn session_bin(meta: &SessionMeta) -> Option<&'static str> {
     }
 }
 
+/// 明确区分“用来打开的终端”与“要在终端里跑的 agent CLI”。
+/// 用 PATH 而非 shell PATH:POSIX 经 login shell 探测,Windows 则直接遍历
+/// PATH × PATHEXT,这一份文案必须在三端都准确。
+fn cli_not_found_error(agent: AgentId, bin: &str) -> String {
+    format!(
+        "Agent CLI `{bin}` for {} was not found on PATH — is it installed and available to Wake?",
+        agent.display_name()
+    )
+}
+
 pub fn agent_bin(agent: AgentId) -> Option<&'static str> {
     match agent {
         AgentId::ClaudeCode => Some("claude"),
@@ -180,10 +190,7 @@ pub fn resume_session_in(meta: &SessionMeta, term: TerminalApp) -> ResumeOutcome
         return ResumeOutcome {
             ok: false,
             command: String::new(),
-            error: Some(format!(
-                "Command {} not found — is it installed?",
-                bin.unwrap_or("?")
-            )),
+            error: Some(cli_not_found_error(meta.agent, bin.unwrap_or("?"))),
         };
     };
     let cwd_ok = !meta.project_path.is_empty() && Path::new(&meta.project_path).is_dir();
@@ -295,7 +302,8 @@ fn spawn_and_reap(mut cmd: Command) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_clis_with;
+    use super::{cli_not_found_error, resolve_clis_with};
+    use crate::models::AgentId;
     use std::cell::Cell;
     use std::collections::HashMap;
 
@@ -335,5 +343,21 @@ mod tests {
         );
         assert_eq!(second, first);
         assert_eq!(probes.get(), 0);
+    }
+
+    #[test]
+    fn cli_not_found_error_names_agent_and_cli() {
+        assert_eq!(
+            cli_not_found_error(AgentId::Omp, "omp"),
+            "Agent CLI `omp` for Oh My Pi was not found on PATH — is it installed and available to Wake?"
+        );
+    }
+
+    #[test]
+    fn cli_not_found_error_keeps_session_specific_cli() {
+        assert_eq!(
+            cli_not_found_error(AgentId::Opencode, "opencode2"),
+            "Agent CLI `opencode2` for OpenCode was not found on PATH — is it installed and available to Wake?"
+        );
     }
 }
