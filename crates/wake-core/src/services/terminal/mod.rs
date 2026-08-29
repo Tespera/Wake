@@ -59,25 +59,37 @@ pub struct ResumeOutcome {
     pub error: Option<String>,
 }
 
-/// GUI 进程 PATH 不全(macOS/Linux 缺 ~/.local/bin 等),批量解析并缓存
-static CLI_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+/// GUI 进程 PATH 不全(macOS/Linux 缺 ~/.local/bin 等),批量解析并缓存。
+/// 只缓存命中:miss 常发生在用户看到提示后刚装好 CLI 的时刻,
+/// 下次点击必须重新探测,不能要求重启 Wake。
+static CLI_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn resolve_clis(bins: &[&str]) -> HashMap<String, Option<String>> {
     let mut cache = CLI_CACHE.lock().unwrap();
     let map = cache.get_or_insert_with(HashMap::new);
+    resolve_clis_with(map, bins, probe_clis)
+}
+
+fn resolve_clis_with(
+    cache: &mut HashMap<String, String>,
+    bins: &[&str],
+    probe: impl FnOnce(&[&str]) -> HashMap<String, String>,
+) -> HashMap<String, Option<String>> {
     let missing: Vec<&str> = bins
         .iter()
-        .filter(|b| !map.contains_key(**b))
+        .filter(|b| !cache.contains_key(**b))
         .copied()
         .collect();
     if !missing.is_empty() {
-        let found = probe_clis(&missing);
+        let found = probe(&missing);
         for b in missing {
-            map.insert(b.to_string(), found.get(b).cloned());
+            if let Some(path) = found.get(b) {
+                cache.insert(b.to_string(), path.clone());
+            }
         }
     }
     bins.iter()
-        .map(|b| (b.to_string(), map.get(*b).cloned().flatten()))
+        .map(|b| (b.to_string(), cache.get(*b).cloned()))
         .collect()
 }
 
@@ -279,4 +291,49 @@ fn spawn_and_reap(mut cmd: Command) -> std::io::Result<()> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_clis_with;
+    use std::cell::Cell;
+    use std::collections::HashMap;
+
+    #[test]
+    fn cli_cache_reprobes_misses() {
+        let mut cache = HashMap::new();
+        let probes = Cell::new(0);
+
+        for _ in 0..2 {
+            let resolved = resolve_clis_with(&mut cache, &["omp"], |_| {
+                probes.set(probes.get() + 1);
+                HashMap::new()
+            });
+            assert_eq!(resolved.get("omp"), Some(&None));
+        }
+
+        assert_eq!(probes.get(), 2);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn cli_cache_reuses_hits() {
+        let mut cache = HashMap::new();
+        let first = resolve_clis_with(&mut cache, &["omp"], |_| {
+            HashMap::from([("omp".to_string(), "/opt/bin/omp".to_string())])
+        });
+        let probes = Cell::new(0);
+
+        let second = resolve_clis_with(&mut cache, &["omp"], |_| {
+            probes.set(probes.get() + 1);
+            HashMap::new()
+        });
+
+        assert_eq!(
+            first.get("omp").and_then(Option::as_deref),
+            Some("/opt/bin/omp")
+        );
+        assert_eq!(second, first);
+        assert_eq!(probes.get(), 0);
+    }
 }

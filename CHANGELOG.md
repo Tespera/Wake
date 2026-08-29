@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Fixed: agent CLI detection now ignores login-shell rc output, including unterminated ANSI title escapes, by parsing only newline-framed Wake probe records
+- Fixed: agent CLIs installed while Wake is running are detected on the next resume attempt; successful lookups remain cached while misses are re-probed
 
 ## [0.3.0] — 2026-08-27
 
