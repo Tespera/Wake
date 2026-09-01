@@ -3,8 +3,8 @@
 //! 线程化)在 mod.rs,这里只做动作本身。
 
 use super::{
-    percent_encode, pipe_to, posix_quote, resolve_cli, resume_args, session_bin, spawn_and_reap,
-    ResumeOutcome,
+    cli_not_found_error, percent_encode, pipe_to, posix_quote, resolve_cli, resume_args,
+    session_bin, spawn_and_reap, ResumeOutcome,
 };
 use crate::models::{AgentId, SessionMeta};
 use std::collections::HashMap;
@@ -320,10 +320,7 @@ fn launch_kooky_cli(meta: &SessionMeta) -> ResumeOutcome {
     // 顺带承担"装没装"的判断:少了这步,kooky 会开出一个只写着 command not
     // found 的 tab,而 Wake 这边照报成功
     let Some(exe) = resolve_cli(bin) else {
-        return fail(
-            String::new(),
-            format!("Command {bin} not found — is it installed?"),
-        );
+        return fail(String::new(), cli_not_found_error(meta.agent, bin));
     };
     let cmd = std::iter::once(exe.as_str())
         .chain(args.iter().map(|s| s.as_str()))

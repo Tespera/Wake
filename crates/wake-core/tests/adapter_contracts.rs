@@ -1721,9 +1721,6 @@ fn removed_defaults_suppress_instances() {
         .all(|r| r.starts_with(dir.path())));
 }
 
-/// normalize_custom_root(静态分派,不依赖 roster——该家默认被移除时也要
-/// 生效):codex 直选 sessions 树或**平铺 archived** 且父目录呈 home 形态时
-/// 上提一层(侧档/归档找回,2026-08-24 Codex review);裸拷贝与其他家恒等
 #[test]
 fn codex_subagent_transcript_injection_is_meta() {
     setup();
@@ -1779,6 +1776,9 @@ fn codex_subagent_transcript_injection_is_meta() {
     assert_eq!(s.meta.title, "继续");
 }
 
+/// normalize_custom_root(静态分派,不依赖 roster——该家默认被移除时也要
+/// 生效):codex 直选 sessions 树或**平铺 archived** 且父目录呈 home 形态时
+/// 上提一层(侧档/归档找回,2026-08-24 Codex review);裸拷贝与其他家恒等
 #[test]
 fn codex_normalize_lifts_sessions_dir_to_home() {
     use wake_core::adapters::normalize_custom_root;

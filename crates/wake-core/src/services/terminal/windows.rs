@@ -260,8 +260,15 @@ pub fn installed_terminals() -> &'static [TerminalApp] {
 /// 时它们同样起不来,得跟着藏掉(macOS 用同一个钩子藏 Kooky)。否则用户点
 /// 下去只能拿到 "PowerShell not found" 加一条自己没有 shell 去跑的命令
 pub fn terminals_for(_agent: AgentId) -> Vec<TerminalApp> {
-    let has_ps = powershell_bin().is_ok();
-    installed_terminals()
+    // 这里挂在每个会话行的 render 上,不能调 powershell_bin:
+    // CLI miss 不缓存后,没装 pwsh 的机器会每帧重扫 PATH × PATHEXT。
+    // 已安装终端清单本就是启动期快照,用它判断即可;真正点击
+    // 启动时 powershell_bin 仍会活查,新安装的 pwsh 能立即生效。
+    let installed = installed_terminals();
+    let has_ps = installed
+        .iter()
+        .any(|t| matches!(t, TerminalApp::Pwsh | TerminalApp::WindowsPowershell));
+    installed
         .iter()
         .copied()
         .filter(|t| has_ps || !t.needs_powershell())

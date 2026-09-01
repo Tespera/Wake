@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 use std::process::Command;
 
+const CLI_PROBE_MARKER: &str = "__WAKE_CLI__";
+
 /// 解析 PATH 用的 login shell:macOS 固定 zsh(系统默认);Linux 尊重 $SHELL
 /// (bash/zsh/fish 对 `-lic` 与 `command -v` 语义一致),缺省 /bin/bash
 fn login_shell() -> String {
@@ -19,27 +21,47 @@ fn login_shell() -> String {
 }
 
 /// 批量探测缺失 bin 的绝对路径:login shell 里 `command -v`,把用户 rc 文件
-/// 加进 PATH 的目录一并覆盖(GUI 进程 PATH 不含 ~/.local/bin 等)。
+/// 加进 PATH 的目录一并覆盖(GUI 进程 PATH 不含 ~/.local/bin 等)。每条记录
+/// 先换行再打固定标记,rc 链打到 stdout 的无换行文本或 ANSI/OSC 噪声
+/// 都会留在上一行;解析器只接受本次请求且带标记的记录。
 /// Windows 的对应物在 windows.rs(注册表 PATH 天然完整,纯 Rust 遍历)。
 pub(super) fn probe_clis(missing: &[&str]) -> HashMap<String, String> {
     let script = missing
         .iter()
-        .map(|b| format!("printf '%s\\t' {b}; command -v {b} || echo"))
+        .map(|b| {
+            format!(
+                "printf '\\n{}\\t%s\\t' {b}; command -v {b} || printf '\\n'",
+                CLI_PROBE_MARKER
+            )
+        })
         .collect::<Vec<_>>()
         .join("; ");
     let out = Command::new(login_shell()).args(["-lic", &script]).output();
-    let stdout = out
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
+    out.ok()
+        .map(|o| parse_probe_output(&o.stdout, missing))
+        .unwrap_or_default()
+}
+
+fn parse_probe_output(stdout: &[u8], requested: &[&str]) -> HashMap<String, String> {
+    let stdout = String::from_utf8_lossy(stdout);
     let mut found = HashMap::new();
+
     for line in stdout.lines() {
-        if let Some((name, path)) = line.split_once('\t') {
-            if path.starts_with('/') {
-                found.insert(name.trim().to_string(), path.trim().to_string());
-            }
+        let Some(record) = line
+            .strip_prefix(CLI_PROBE_MARKER)
+            .and_then(|rest| rest.strip_prefix('\t'))
+        else {
+            continue;
+        };
+        let Some((name, path)) = record.split_once('\t') else {
+            continue;
+        };
+        let path = path.trim();
+        if requested.contains(&name) && path.starts_with('/') {
+            found.insert(name.to_string(), path.to_string());
         }
     }
+
     found
 }
 
@@ -111,4 +133,52 @@ pub(crate) fn pipe_to(bin: &str, args: &[&str], text: &str) -> bool {
         let _ = stdin.write_all(text.as_bytes());
     }
     child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_probe_output;
+
+    #[test]
+    fn probe_parser_ignores_osc_title_before_record() {
+        let stdout = b"\x1b]0;Wake\x07\n__WAKE_CLI__\tomp\t/Users/loosheng/Library/pnpm/omp\n";
+
+        let found = parse_probe_output(stdout, &["omp"]);
+
+        assert_eq!(
+            found.get("omp").map(String::as_str),
+            Some("/Users/loosheng/Library/pnpm/omp")
+        );
+    }
+
+    #[test]
+    fn probe_parser_ignores_unterminated_osc_before_record() {
+        let stdout = b"\x1b]0;Wake\n__WAKE_CLI__\tomp\t/opt/bin/omp\n";
+
+        let found = parse_probe_output(stdout, &["omp"]);
+
+        assert_eq!(found.get("omp").map(String::as_str), Some("/opt/bin/omp"));
+    }
+
+    #[test]
+    fn probe_parser_ignores_unmarked_noise() {
+        let stdout = b"noise\t/tmp/fake\n__WAKE_CLI__\tomp\t/opt/bin/omp\n";
+
+        let found = parse_probe_output(stdout, &["omp"]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found.get("omp").map(String::as_str), Some("/opt/bin/omp"));
+    }
+
+    #[test]
+    fn probe_parser_filters_missing_and_unrequested_clis() {
+        let stdout = b"__WAKE_CLI__\tomp\t/opt/bin/omp\n\
+__WAKE_CLI__\tcodex\t\n\
+__WAKE_CLI__\tgemini\t/opt/bin/gemini\n";
+
+        let found = parse_probe_output(stdout, &["omp", "codex"]);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found.get("omp").map(String::as_str), Some("/opt/bin/omp"));
+    }
 }
